@@ -10,6 +10,14 @@ from .dashboard import (
     MemberDashboardResponse,
 )
 from .health import HealthResponse
+from .member import (
+    MemberCreateRequest,
+    MemberDeleteResponse,
+    MemberListResponse,
+    MemberOperationResponse,
+    MemberResponse,
+    MemberUpdateRequest,
+)
 
 __all__ = [
     "LoginRequest",
@@ -19,4 +27,10 @@ __all__ = [
     "TrainerDashboardResponse",
     "MemberDashboardResponse",
     "HealthResponse",
+    "MemberCreateRequest",
+    "MemberUpdateRequest",
+    "MemberResponse",
+    "MemberListResponse",
+    "MemberOperationResponse",
+    "MemberDeleteResponse",
 ]
