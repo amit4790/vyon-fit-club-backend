@@ -16,7 +16,30 @@ from schemas.member import (
     MemberUpdateRequest,
     PaginationMeta,
 )
+from schemas.invoice import (
+    InvoiceListResponse,
+    InvoiceOperationResponse,
+    InvoiceStatusUpdateRequest,
+)
+from schemas.subscription import (
+    AssignSubscriptionRequest,
+    ExpiringSubscriptionsResponse,
+    MemberSubscriptionsResponse,
+    PlanCatalogResponse,
+    SubscriptionOperationResponse,
+)
 from services.member_service import DuplicateMobileError, MemberNotFoundError, MemberService
+from services.invoice_service import (
+    InvalidInvoiceStatusTransitionError,
+    InvoiceNotFoundError,
+    InvoiceService,
+)
+from services.subscription_service import (
+    MemberNotFoundError as SubscriptionMemberNotFoundError,
+    PlanNotFoundError,
+    SubscriptionConflictError,
+    SubscriptionService,
+)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -163,6 +186,176 @@ def delete_member(member_id: int, db: Session = Depends(get_db)) -> MemberDelete
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     return MemberDeleteResponse(message="Member deleted successfully")
+
+
+@router.get("/plans", response_model=PlanCatalogResponse)
+def get_plan_catalog(db: Session = Depends(get_db)) -> PlanCatalogResponse:
+    """Get active membership plan catalog."""
+    service = SubscriptionService(db)
+    service.sync_expired_subscriptions()
+    catalog = service.get_plan_catalog()
+    return PlanCatalogResponse(message="Plan catalog", data=catalog)
+
+
+@router.post(
+    "/members/{member_id}/subscriptions",
+    response_model=SubscriptionOperationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def assign_member_subscription(
+    member_id: int,
+    payload: AssignSubscriptionRequest,
+    db: Session = Depends(get_db),
+) -> SubscriptionOperationResponse:
+    """Assign a membership subscription to a member."""
+    service = SubscriptionService(db)
+
+    try:
+        subscription, notifications = service.assign_subscription(
+            member_id=member_id,
+            plan_id=payload.plan_id,
+            start_date=payload.start_date,
+        )
+    except SubscriptionMemberNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except PlanNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except SubscriptionConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    return SubscriptionOperationResponse(
+        message="Subscription assigned successfully",
+        data=subscription,
+        notifications=notifications,
+    )
+
+
+@router.get("/members/{member_id}/subscriptions", response_model=MemberSubscriptionsResponse)
+def get_member_subscriptions(member_id: int, db: Session = Depends(get_db)) -> MemberSubscriptionsResponse:
+    """Get all subscriptions for a specific member."""
+    service = SubscriptionService(db)
+
+    try:
+        subscriptions = service.get_member_subscriptions(member_id)
+    except SubscriptionMemberNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    return MemberSubscriptionsResponse(message="Member subscriptions", data=subscriptions)
+
+
+@router.get("/subscriptions/expiring", response_model=ExpiringSubscriptionsResponse)
+def get_expiring_subscriptions(
+    days: int = Query(7, ge=1, le=90, description="Lookahead window in days"),
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(10, ge=1, le=100, description="Items per page"),
+    db: Session = Depends(get_db),
+) -> ExpiringSubscriptionsResponse:
+    """Get active subscriptions expiring within the configured window."""
+    service = SubscriptionService(db)
+    service.sync_expired_subscriptions()
+    result = service.get_expiring_subscriptions(days=days, page=page, page_size=page_size)
+
+    total_pages = result.total_items // page_size + (1 if result.total_items % page_size else 0)
+    if result.total_items == 0:
+        total_pages = 0
+
+    return ExpiringSubscriptionsResponse(
+        message="Expiring subscriptions",
+        data=result.items,
+        pagination={
+            "page": page,
+            "page_size": page_size,
+            "total_items": result.total_items,
+            "total_pages": total_pages,
+            "days": days,
+        },
+    )
+
+
+@router.get("/invoices", response_model=InvoiceListResponse)
+def get_invoices(
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(10, ge=1, le=100, description="Items per page"),
+    status_filter: str | None = Query(None, alias="status", description="Invoice status filter"),
+    member_id: int | None = Query(None, ge=1, description="Filter by member id"),
+    db: Session = Depends(get_db),
+) -> InvoiceListResponse:
+    """Get paginated invoices with optional filters."""
+    service = InvoiceService(db)
+    invoices, total_items = service.list_invoices(
+        page=page,
+        page_size=page_size,
+        status=status_filter,
+        member_id=member_id,
+    )
+
+    total_pages = total_items // page_size + (1 if total_items % page_size else 0)
+    if total_items == 0:
+        total_pages = 0
+
+    return InvoiceListResponse(
+        message="Invoices list",
+        data=invoices,
+        pagination={
+            "page": page,
+            "page_size": page_size,
+            "total_items": total_items,
+            "total_pages": total_pages,
+        },
+    )
+
+
+@router.get("/invoices/{invoice_id}", response_model=InvoiceOperationResponse)
+def get_invoice_by_id(invoice_id: int, db: Session = Depends(get_db)) -> InvoiceOperationResponse:
+    """Get invoice details by id."""
+    service = InvoiceService(db)
+
+    try:
+        invoice = service.get_invoice(invoice_id)
+    except InvoiceNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    return InvoiceOperationResponse(message="Invoice details", data=invoice, notifications=[])
+
+
+@router.patch("/invoices/{invoice_id}/status", response_model=InvoiceOperationResponse)
+def update_invoice_status(
+    invoice_id: int,
+    payload: InvoiceStatusUpdateRequest,
+    db: Session = Depends(get_db),
+) -> InvoiceOperationResponse:
+    """Update invoice payment status."""
+    service = InvoiceService(db)
+
+    try:
+        invoice, notifications = service.update_invoice_status(invoice_id, payload.status)
+    except InvoiceNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except InvalidInvoiceStatusTransitionError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    return InvoiceOperationResponse(
+        message="Invoice status updated successfully",
+        data=invoice,
+        notifications=service.delivery_results_to_dict(notifications),
+    )
+
+
+@router.post("/invoices/{invoice_id}/resend", response_model=InvoiceOperationResponse)
+def resend_invoice(invoice_id: int, db: Session = Depends(get_db)) -> InvoiceOperationResponse:
+    """Resend invoice notifications over dummy email and SMS channels."""
+    service = InvoiceService(db)
+
+    try:
+        invoice, notifications = service.resend_invoice(invoice_id)
+    except InvoiceNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    return InvoiceOperationResponse(
+        message="Invoice resent successfully",
+        data=invoice,
+        notifications=service.delivery_results_to_dict(notifications),
+    )
 
 
 @router.get("/trainers")

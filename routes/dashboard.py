@@ -3,6 +3,9 @@ Dashboard Routes
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from database import get_db
 from schemas.dashboard import (
     AdminDashboardResponse,
     TrainerDashboardResponse,
@@ -20,14 +23,14 @@ router = APIRouter(prefix="/api/dashboard", tags=["Dashboard"])
     description="Get admin dashboard with system statistics",
     responses={200: {"description": "Admin dashboard data retrieved successfully"}}
 )
-def get_admin_dashboard() -> AdminDashboardResponse:
+def get_admin_dashboard(db: Session = Depends(get_db)) -> AdminDashboardResponse:
     """
     Admin dashboard endpoint
     
     Returns:
         AdminDashboardResponse: Admin dashboard with statistics
     """
-    return DashboardService.get_admin_dashboard()
+    return DashboardService.get_admin_dashboard(db)
 
 
 @router.get(

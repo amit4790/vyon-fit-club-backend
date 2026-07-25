@@ -57,7 +57,8 @@ if not success:
 # Test dashboard service
 print("\n📊 Dashboard Service Test:")
 admin_dash = DashboardService.get_admin_dashboard()
-print(f"  ✅ Admin Dashboard: {admin_dash.total_members} members, ${admin_dash.monthly_revenue:.2f} revenue")
+revenue_text = f"${admin_dash.monthly_revenue:.2f}" if admin_dash.monthly_revenue is not None else "N/A"
+print(f"  ✅ Admin Dashboard: {admin_dash.total_members} members, revenue {revenue_text}")
 
 trainer_dash = DashboardService.get_trainer_dashboard()
 print(f"  ✅ Trainer Dashboard: {trainer_dash.trainer_name}, {trainer_dash.todays_sessions} sessions today")
