@@ -4,6 +4,7 @@ Handles admin dashboard and management endpoints.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from database import get_db
@@ -17,6 +18,8 @@ from schemas.member import (
     PaginationMeta,
 )
 from schemas.invoice import (
+    CapturePaymentRequest,
+    CapturePaymentResponse,
     InvoiceListResponse,
     InvoiceOperationResponse,
     InvoiceStatusUpdateRequest,
@@ -26,19 +29,36 @@ from schemas.subscription import (
     ExpiringSubscriptionsResponse,
     MemberSubscriptionsResponse,
     PlanCatalogResponse,
+    PlanOptionOperationResponse,
+    PlanPriceUpdateRequest,
     SubscriptionOperationResponse,
+)
+from schemas.trainer import (
+    TrainerCreateRequest,
+    TrainerDeleteResponse,
+    TrainerListResponse,
+    TrainerOperationResponse,
+    TrainerResponse,
+    TrainerUpdateRequest,
 )
 from services.member_service import DuplicateMobileError, MemberNotFoundError, MemberService
 from services.invoice_service import (
+    InvalidPaymentAmountError,
     InvalidInvoiceStatusTransitionError,
     InvoiceNotFoundError,
     InvoiceService,
+    SubscriptionNotFoundError,
 )
 from services.subscription_service import (
     MemberNotFoundError as SubscriptionMemberNotFoundError,
     PlanNotFoundError,
     SubscriptionConflictError,
     SubscriptionService,
+)
+from services.trainer_service import (
+    DuplicateTrainerEmailError,
+    TrainerNotFoundError,
+    TrainerService,
 )
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -197,6 +217,27 @@ def get_plan_catalog(db: Session = Depends(get_db)) -> PlanCatalogResponse:
     return PlanCatalogResponse(message="Plan catalog", data=catalog)
 
 
+@router.patch("/plans/{plan_id}", response_model=PlanOptionOperationResponse)
+def update_plan_price(
+    plan_id: int,
+    payload: PlanPriceUpdateRequest,
+    db: Session = Depends(get_db),
+) -> PlanOptionOperationResponse:
+    """Update membership plan pricing."""
+    service = SubscriptionService(db)
+
+    try:
+        option = service.update_plan_pricing(
+            plan_id=plan_id,
+            base_price=payload.base_price,
+            tax_percent=payload.tax_percent,
+        )
+    except PlanNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    return PlanOptionOperationResponse(message="Plan pricing updated successfully", data=option)
+
+
 @router.post(
     "/members/{member_id}/subscriptions",
     response_model=SubscriptionOperationResponse,
@@ -241,6 +282,46 @@ def get_member_subscriptions(member_id: int, db: Session = Depends(get_db)) -> M
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     return MemberSubscriptionsResponse(message="Member subscriptions", data=subscriptions)
+
+
+@router.get("/subscriptions/{subscription_id}", response_model=SubscriptionOperationResponse)
+def get_subscription_by_id(subscription_id: int, db: Session = Depends(get_db)) -> SubscriptionOperationResponse:
+    """Get a subscription record by id."""
+    service = SubscriptionService(db)
+
+    subscription = service.repo.get_subscription_by_id(subscription_id)
+    if not subscription:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subscription not found")
+
+    return SubscriptionOperationResponse(
+        message="Subscription details",
+        data=service._to_subscription_response(subscription),
+        notifications=[],
+    )
+
+
+@router.post(
+    "/subscriptions/{subscription_id}/payment",
+    response_model=CapturePaymentResponse,
+)
+def capture_subscription_payment(
+    subscription_id: int,
+    payload: CapturePaymentRequest,
+    db: Session = Depends(get_db),
+) -> CapturePaymentResponse:
+    """Capture payment details for a subscription and generate invoice PDF."""
+    service = InvoiceService(db)
+
+    try:
+        invoice = service.capture_payment_for_subscription(subscription_id=subscription_id, payload=payload)
+    except SubscriptionNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except InvoiceNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except InvalidPaymentAmountError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    return CapturePaymentResponse(message="Payment saved successfully", data=invoice)
 
 
 @router.get("/subscriptions/expiring", response_model=ExpiringSubscriptionsResponse)
@@ -318,6 +399,23 @@ def get_invoice_by_id(invoice_id: int, db: Session = Depends(get_db)) -> Invoice
     return InvoiceOperationResponse(message="Invoice details", data=invoice, notifications=[])
 
 
+@router.get("/invoices/{invoice_id}/download")
+def download_invoice(invoice_id: int, db: Session = Depends(get_db)) -> FileResponse:
+    """Download generated invoice PDF."""
+    service = InvoiceService(db)
+
+    try:
+        pdf_path = service.get_invoice_pdf_path(invoice_id)
+    except InvoiceNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    return FileResponse(
+        path=pdf_path,
+        media_type="application/pdf",
+        filename=f"invoice-{invoice_id}.pdf",
+    )
+
+
 @router.patch("/invoices/{invoice_id}/status", response_model=InvoiceOperationResponse)
 def update_invoice_status(
     invoice_id: int,
@@ -358,19 +456,88 @@ def resend_invoice(invoice_id: int, db: Session = Depends(get_db)) -> InvoiceOpe
     )
 
 
-@router.get("/trainers")
-async def get_trainers():
-    """
-    Get list of all trainers.
-    """
-    return {
-        "message": "Trainers list",
-        "data": [
-            {"id": 1, "name": "John Smith", "specialization": "Strength Training", "clients": 8},
-            {"id": 2, "name": "Sarah Johnson", "specialization": "Cardio & HIIT", "clients": 10},
-            {"id": 3, "name": "Mike Davis", "specialization": "Flexibility & Yoga", "clients": 6}
-        ]
-    }
+@router.get("/trainers", response_model=TrainerListResponse)
+def get_trainers(db: Session = Depends(get_db)) -> TrainerListResponse:
+    """Get list of all trainers."""
+    service = TrainerService(db)
+    trainers = service.list_trainers()
+
+    return TrainerListResponse(
+        message="Trainers list",
+        data=[
+            TrainerResponse(
+                id=trainer.id,
+                full_name=trainer.full_name,
+                email=trainer.email,
+                role=trainer.role,
+                is_active=trainer.is_active,
+            )
+            for trainer in trainers
+        ],
+    )
+
+
+@router.post("/trainers", response_model=TrainerOperationResponse, status_code=status.HTTP_201_CREATED)
+def create_trainer(payload: TrainerCreateRequest, db: Session = Depends(get_db)) -> TrainerOperationResponse:
+    """Create a new trainer."""
+    service = TrainerService(db)
+
+    try:
+        trainer = service.create_trainer(payload)
+    except DuplicateTrainerEmailError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    return TrainerOperationResponse(
+        message="Trainer created successfully",
+        data=TrainerResponse(
+            id=trainer.id,
+            full_name=trainer.full_name,
+            email=trainer.email,
+            role=trainer.role,
+            is_active=trainer.is_active,
+        ),
+    )
+
+
+@router.put("/trainers/{trainer_id}", response_model=TrainerOperationResponse)
+def update_trainer(
+    trainer_id: int,
+    payload: TrainerUpdateRequest,
+    db: Session = Depends(get_db),
+) -> TrainerOperationResponse:
+    """Update trainer details."""
+    service = TrainerService(db)
+
+    try:
+        trainer = service.update_trainer(trainer_id, payload)
+    except TrainerNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except DuplicateTrainerEmailError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    return TrainerOperationResponse(
+        message="Trainer updated successfully",
+        data=TrainerResponse(
+            id=trainer.id,
+            full_name=trainer.full_name,
+            email=trainer.email,
+            role=trainer.role,
+            is_active=trainer.is_active,
+        ),
+    )
+
+
+@router.delete("/trainers/{trainer_id}", response_model=TrainerDeleteResponse)
+def delete_trainer(trainer_id: int, db: Session = Depends(get_db)) -> TrainerDeleteResponse:
+    """Soft-delete trainer by setting inactive state."""
+    service = TrainerService(db)
+
+    try:
+        service.delete_trainer(trainer_id)
+    except TrainerNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    return TrainerDeleteResponse(message="Trainer deleted successfully")
 
 
 @router.get("/classes")

@@ -5,7 +5,7 @@ Subscription repository for plan catalog and assignment queries.
 from datetime import date
 
 from sqlalchemy import Select, and_, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from models import Member, MembershipPlan, MembershipSubscription
 
@@ -21,6 +21,10 @@ class SubscriptionRepository:
             MembershipPlan.id == plan_id,
             MembershipPlan.is_active.is_(True),
         )
+        return self.db.execute(statement).scalar_one_or_none()
+
+    def get_plan_by_id(self, plan_id: int) -> MembershipPlan | None:
+        statement = select(MembershipPlan).where(MembershipPlan.id == plan_id)
         return self.db.execute(statement).scalar_one_or_none()
 
     def list_active_plans(self) -> list[MembershipPlan]:
@@ -52,6 +56,17 @@ class SubscriptionRepository:
         self.db.flush()
         self.db.refresh(subscription)
         return subscription
+
+    def get_subscription_by_id(self, subscription_id: int) -> MembershipSubscription | None:
+        statement = (
+            select(MembershipSubscription)
+            .options(
+                joinedload(MembershipSubscription.member),
+                joinedload(MembershipSubscription.plan),
+            )
+            .where(MembershipSubscription.id == subscription_id)
+        )
+        return self.db.execute(statement).scalar_one_or_none()
 
     def list_member_subscriptions(self, member_id: int) -> list[MembershipSubscription]:
         statement = (

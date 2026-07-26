@@ -13,7 +13,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from sqlalchemy.orm import Session
 
-from models import Invoice, MembershipSubscription
+from models import Invoice, MembershipPlan, MembershipSubscription
 from repositories.invoice_repository import InvoiceRepository
 from repositories.subscription_repository import SubscriptionRepository
 from schemas.subscription import (
@@ -116,6 +116,54 @@ class SubscriptionService:
 
         return list(grouped.values())
 
+    def _plan_to_option(self, plan: MembershipPlan) -> PlanOptionResponse:
+        base_price = self._to_money(plan.base_price)
+        tax_percent = self._to_money(plan.tax_percent)
+        tax_amount = self._to_money(base_price * tax_percent / Decimal("100"))
+        total_price = self._to_money(base_price + tax_amount)
+
+        return PlanOptionResponse(
+            id=plan.id,
+            sku=plan.name,
+            label=plan.name,
+            variant=plan.variant_name,
+            duration_months=plan.duration_months,
+            duration_label=plan.duration_label,
+            base_price=float(base_price),
+            tax_percent=float(tax_percent),
+            tax_amount=float(tax_amount),
+            total_price=float(total_price),
+        )
+
+    def update_plan_pricing(
+        self,
+        *,
+        plan_id: int,
+        base_price: Decimal | float,
+        tax_percent: Decimal | float | None,
+    ) -> PlanOptionResponse:
+        plan = self.repo.get_plan_by_id(plan_id)
+        if not plan:
+            raise PlanNotFoundError("Membership plan not found")
+
+        normalized_base = self._to_money(base_price)
+        normalized_tax = self._to_money(tax_percent if tax_percent is not None else plan.tax_percent)
+        normalized_total = self._to_money(normalized_base + (normalized_base * normalized_tax / Decimal("100")))
+
+        plan.base_price = float(normalized_base)
+        plan.tax_percent = float(normalized_tax)
+        plan.total_price = float(normalized_total)
+        plan.price = float(normalized_total)
+
+        try:
+            self.db.commit()
+            self.db.refresh(plan)
+        except Exception:
+            self.db.rollback()
+            raise
+
+        return self._plan_to_option(plan)
+
     def assign_subscription(
         self,
         member_id: int,
@@ -147,6 +195,7 @@ class SubscriptionService:
             start_date=start_date,
             end_date=end_date,
             status="active",
+            payment_status="pending",
             base_price=float(base_price),
             tax_percent=float(tax_percent),
             tax_amount=float(tax_amount),
@@ -221,10 +270,12 @@ class SubscriptionService:
         return SubscriptionResponse(
             id=row.id,
             member_id=row.member_id,
+            member_name=row.member.full_name if row.member else None,
             plan_id=row.plan_id,
             plan_family=plan.family_name.upper(),
             plan_variant=plan.variant_name,
             plan_label=plan.name,
+            duration_label=plan.duration_label,
             start_date=row.start_date,
             end_date=row.end_date,
             status=row.status,
@@ -232,4 +283,5 @@ class SubscriptionService:
             tax_percent=float(row.tax_percent),
             tax_amount=float(row.tax_amount),
             total_amount=float(row.total_amount),
+            payment_status=row.payment_status,
         )

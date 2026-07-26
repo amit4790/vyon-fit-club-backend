@@ -1,9 +1,9 @@
 """Invoice SQLAlchemy model."""
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, Numeric, String, func
+from sqlalchemy import Date, DateTime, ForeignKey, Numeric, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
@@ -25,6 +25,18 @@ class Invoice(Base):
         nullable=False,
         index=True,
     )
+    invoice_number: Mapped[str | None] = mapped_column(String(40), unique=True, nullable=True, index=True)
+    original_price: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
+    final_amount_received: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
+    discount_amount: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
+    discount_percentage: Mapped[float | None] = mapped_column(Numeric(5, 2), nullable=True)
+    gst_amount: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
+    total_paid: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
+    payment_mode: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    transaction_reference: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    payment_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    invoice_pdf_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     amount: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

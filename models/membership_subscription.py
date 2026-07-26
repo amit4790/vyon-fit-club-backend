@@ -28,6 +28,7 @@ class MembershipSubscription(Base):
     tax_percent: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
     tax_amount: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
     total_amount: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    payment_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
