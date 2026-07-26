@@ -3,7 +3,7 @@
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Date, DateTime, ForeignKey, String, func
+from sqlalchemy import Date, DateTime, ForeignKey, Numeric, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
@@ -24,6 +24,11 @@ class MembershipSubscription(Base):
     plan_id: Mapped[int] = mapped_column(ForeignKey("membership_plans.id", ondelete="RESTRICT"), nullable=False, index=True)
     start_date: Mapped[date] = mapped_column(Date, nullable=False)
     end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    base_price: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    tax_percent: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
+    tax_amount: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    total_amount: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    payment_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(

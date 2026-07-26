@@ -5,6 +5,15 @@ Centralized dependencies for request handling
 
 from typing import Optional
 
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+from core.authorization import can_access_admin
+from core.roles import UserRole
+from services.auth_service import AuthService, SessionPayload
+
+bearer_scheme = HTTPBearer(auto_error=False)
+
 
 class RequestContext:
     """Context object for request information"""
@@ -20,3 +29,28 @@ def get_request_context() -> RequestContext:
     Can be extended with authentication later
     """
     return RequestContext()
+
+
+def get_current_session(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> SessionPayload:
+    if not credentials or credentials.scheme.lower() != "bearer":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+
+    session = AuthService.get_session(credentials.credentials)
+    if not session:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+
+    return session
+
+
+def require_admin_access(session: SessionPayload = Depends(get_current_session)) -> SessionPayload:
+    if not can_access_admin(session.role):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
+    return session
+
+
+def require_super_admin(session: SessionPayload = Depends(get_current_session)) -> SessionPayload:
+    if session.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
+    return session

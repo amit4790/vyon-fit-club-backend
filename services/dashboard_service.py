@@ -4,6 +4,10 @@ Handles dashboard data retrieval for different user roles
 """
 
 from datetime import datetime, timedelta
+from sqlalchemy.orm import Session
+
+from database import SessionLocal
+from repositories import DashboardRepository
 from schemas.dashboard import (
     AdminDashboardResponse,
     TrainerDashboardResponse,
@@ -16,36 +20,51 @@ from schemas.dashboard import (
 
 class DashboardService:
     """Service for dashboard operations"""
+
+    def __init__(self, db: Session):
+        self.db = db
+        self.repository = DashboardRepository(db)
     
-    @staticmethod
-    def get_admin_dashboard() -> AdminDashboardResponse:
+    def _build_admin_dashboard(self) -> AdminDashboardResponse:
         """
-        Get admin dashboard data with mock statistics
+        Get admin dashboard data from the database.
         """
+        total_members = self.repository.get_total_members()
+        active_members = self.repository.get_active_members()
+        total_trainers = self.repository.get_total_trainers()
+        inactive_members = self.repository.get_inactive_members()
+        expiring_memberships = self.repository.get_expiring_memberships(days=30)
+        recent_members = self.repository.get_recent_registrations(limit=5)
+
         return AdminDashboardResponse(
-            total_members=250,
-            active_members=185,
-            monthly_revenue=15750.50,
-            expiring_memberships=12,
-            todays_checkins=42,
+            total_members=total_members,
+            active_members=active_members,
+            total_trainers=total_trainers,
+            inactive_members=inactive_members,
+            monthly_revenue=None,
+            expiring_memberships=expiring_memberships,
+            todays_checkins=None,
             recent_registrations=[
                 RecentRegistration(
-                    name="Alice Johnson",
-                    email="alice.johnson@example.com",
-                    registration_date="2024-07-22"
-                ),
-                RecentRegistration(
-                    name="Michael Chen",
-                    email="michael.chen@example.com",
-                    registration_date="2024-07-21"
-                ),
-                RecentRegistration(
-                    name="Emma Davis",
-                    email="emma.davis@example.com",
-                    registration_date="2024-07-20"
-                ),
+                    name=member.full_name,
+                    email=member.email,
+                    registration_date=member.joined_at.isoformat(),
+                )
+                for member in recent_members
             ]
         )
+
+    @staticmethod
+    def get_admin_dashboard(db: Session | None = None) -> AdminDashboardResponse:
+        """Public admin dashboard API used by routes."""
+        if db is not None:
+            return DashboardService(db)._build_admin_dashboard()
+
+        local_db = SessionLocal()
+        try:
+            return DashboardService(local_db)._build_admin_dashboard()
+        finally:
+            local_db.close()
     
     @staticmethod
     def get_trainer_dashboard(trainer_id: str = "trainer_001") -> TrainerDashboardResponse:

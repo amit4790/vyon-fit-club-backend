@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     # Database Settings
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/vyonfitclub"
 
+    # Production administrator bootstrap settings
+    super_admin_email: str = "admin@vyonfitclub.com"
+    super_admin_name: str = "VYON Administrator"
+    super_admin_password: str = ""
+
     class Config:
         env_file = ".env"
         case_sensitive = False

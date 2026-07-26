@@ -19,7 +19,7 @@ class RecentRegistration(BaseModel):
     """Recent registration model"""
     
     name: str
-    email: str
+    email: str | None
     registration_date: str
 
 
@@ -28,9 +28,11 @@ class AdminDashboardResponse(BaseModel):
     
     total_members: int = Field(..., description="Total number of members")
     active_members: int = Field(..., description="Currently active members")
-    monthly_revenue: float = Field(..., description="Revenue this month")
-    expiring_memberships: int = Field(..., description="Memberships expiring this month")
-    todays_checkins: int = Field(..., description="Check-ins today")
+    total_trainers: int | None = Field(None, description="Currently active trainers")
+    inactive_members: int | None = Field(None, description="Currently inactive members")
+    monthly_revenue: float | None = Field(None, description="Revenue this month")
+    expiring_memberships: int | None = Field(None, description="Memberships expiring this month")
+    todays_checkins: int | None = Field(None, description="Check-ins today")
     recent_registrations: List[RecentRegistration] = Field(..., description="Recently registered members")
     
     class Config:
@@ -38,9 +40,11 @@ class AdminDashboardResponse(BaseModel):
             "example": {
                 "total_members": 250,
                 "active_members": 185,
-                "monthly_revenue": 15750.00,
-                "expiring_memberships": 12,
-                "todays_checkins": 42,
+                "total_trainers": 16,
+                "inactive_members": 65,
+                "monthly_revenue": None,
+                "expiring_memberships": None,
+                "todays_checkins": None,
                 "recent_registrations": [
                     {
                         "name": "Alice Johnson",
