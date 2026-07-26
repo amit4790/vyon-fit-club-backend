@@ -9,6 +9,8 @@ from routes import admin_router, auth_router, dashboard_router, health_router
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
+    settings.validate_jwt_configuration()
+
     app = FastAPI(
         title=settings.api_title,
         description=settings.api_description,

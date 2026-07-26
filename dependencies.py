@@ -10,7 +10,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from core.authorization import can_access_admin
 from core.roles import UserRole
-from services.auth_service import AuthService, SessionPayload
+from services.auth_service import AuthService, InvalidTokenError, SessionPayload, TokenExpiredError
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -37,11 +37,12 @@ def get_current_session(
     if not credentials or credentials.scheme.lower() != "bearer":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
 
-    session = AuthService.get_session(credentials.credentials)
-    if not session:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
-
-    return session
+    try:
+        return AuthService.decode_access_token(credentials.credentials)
+    except TokenExpiredError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+    except InvalidTokenError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
 
 
 def require_admin_access(session: SessionPayload = Depends(get_current_session)) -> SessionPayload:

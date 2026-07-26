@@ -46,7 +46,7 @@ def login(credentials: LoginRequest, db: Session = Depends(get_db)) -> LoginResp
             detail=error_message or "Invalid credentials"
         )
     
-    token = AuthService.create_session(user_info)
+    token = AuthService.create_access_token(user_info)
     
     return LoginResponse(
         success=True,
