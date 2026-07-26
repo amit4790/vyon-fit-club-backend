@@ -6,6 +6,8 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 class TrainerBase(BaseModel):
     full_name: str = Field(..., min_length=1, max_length=120)
     email: EmailStr
+    phone_number: str = Field(..., min_length=1, max_length=30)
+    specialization: str | None = Field(default=None, max_length=120)
     is_active: bool = True
 
     @field_validator("full_name")
@@ -20,10 +22,14 @@ class TrainerBase(BaseModel):
 class TrainerCreateRequest(TrainerBase):
     """Request model for creating a trainer."""
 
+    temporary_password: str = Field(..., min_length=6, max_length=128)
+
 
 class TrainerUpdateRequest(BaseModel):
     full_name: str | None = Field(default=None, min_length=1, max_length=120)
     email: EmailStr | None = None
+    phone_number: str | None = Field(default=None, min_length=1, max_length=30)
+    specialization: str | None = Field(default=None, max_length=120)
     is_active: bool | None = None
 
     @field_validator("full_name")
@@ -41,6 +47,8 @@ class TrainerResponse(BaseModel):
     id: int
     full_name: str
     email: str
+    phone_number: str | None
+    specialization: str | None
     role: str
     is_active: bool
 

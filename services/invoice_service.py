@@ -179,6 +179,7 @@ class InvoiceService:
                     total_paid=float(total_paid),
                     payment_mode=payload.payment_mode,
                     transaction_reference=payload.transaction_reference,
+                    payment_status=invoice.status,
                 )
             )
 

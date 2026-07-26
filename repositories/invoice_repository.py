@@ -80,6 +80,34 @@ class InvoiceRepository:
         )
         return items, total_items
 
+    def get_report_metrics(self) -> dict[str, int | float]:
+        total_invoices = self.db.execute(select(func.count(Invoice.id))).scalar_one()
+        paid_invoices = self.db.execute(
+            select(func.count(Invoice.id)).where(Invoice.status == "paid")
+        ).scalar_one()
+        pending_invoices = self.db.execute(
+            select(func.count(Invoice.id)).where(Invoice.status == "pending")
+        ).scalar_one()
+
+        collected_revenue = self.db.execute(
+            select(func.coalesce(func.sum(Invoice.amount), 0)).where(Invoice.status == "paid")
+        ).scalar_one()
+        pending_revenue = self.db.execute(
+            select(func.coalesce(func.sum(Invoice.amount), 0)).where(Invoice.status == "pending")
+        ).scalar_one()
+        average_invoice_value = self.db.execute(
+            select(func.coalesce(func.avg(Invoice.amount), 0))
+        ).scalar_one()
+
+        return {
+            "total_invoices": int(total_invoices or 0),
+            "paid_invoices": int(paid_invoices or 0),
+            "pending_invoices": int(pending_invoices or 0),
+            "collected_revenue": float(collected_revenue or 0),
+            "pending_revenue": float(pending_revenue or 0),
+            "average_invoice_value": float(average_invoice_value or 0),
+        }
+
     def update_status(self, invoice: Invoice, status: str) -> Invoice:
         invoice.status = status
         if status == "paid":

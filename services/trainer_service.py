@@ -1,8 +1,11 @@
 """Trainer service layer for trainer management business logic."""
 
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 
 from core.roles import UserRole
+from core.security import hash_password
+from models import Member
 from models import User
 from repositories import TrainerRepository
 from schemas.trainer import TrainerCreateRequest, TrainerUpdateRequest
@@ -16,6 +19,10 @@ class DuplicateTrainerEmailError(Exception):
     """Raised when a trainer email already exists."""
 
 
+class DuplicateTrainerPhoneError(Exception):
+    """Raised when a trainer phone already exists."""
+
+
 class TrainerService:
     """Service for trainer management operations."""
 
@@ -27,17 +34,22 @@ class TrainerService:
         return self.repository.list_trainers()
 
     def create_trainer(self, payload: TrainerCreateRequest) -> User:
-        existing = self.repository.get_trainer_by_email(str(payload.email))
+        existing = self.db.execute(select(User).where(User.email == str(payload.email))).scalar_one_or_none()
         if existing:
             raise DuplicateTrainerEmailError("Trainer email already exists")
+
+        existing_phone = self.db.execute(select(User).where(User.phone_number == payload.phone_number)).scalar_one_or_none()
+        if existing_phone:
+            raise DuplicateTrainerPhoneError("Trainer phone number already exists")
 
         trainer = User(
             full_name=payload.full_name,
             email=str(payload.email),
+            phone_number=payload.phone_number,
+            specialization=payload.specialization,
             role=UserRole.TRAINER,
             is_active=payload.is_active,
-            # Placeholder value: current auth flow uses mock users only.
-            password_hash="trainer-managed-by-admin",
+            password_hash=hash_password(payload.temporary_password),
         )
 
         try:
@@ -57,10 +69,20 @@ class TrainerService:
 
         if "email" in update_data and update_data["email"] is not None:
             email = str(update_data["email"])
-            existing = self.repository.get_trainer_by_email(email)
+            existing = self.db.execute(select(User).where(User.email == email)).scalar_one_or_none()
             if existing and existing.id != trainer.id:
                 raise DuplicateTrainerEmailError("Trainer email already exists")
             trainer.email = email
+
+        if "phone_number" in update_data and update_data["phone_number"] is not None:
+            phone_number = update_data["phone_number"]
+            existing_phone = self.db.execute(select(User).where(User.phone_number == phone_number)).scalar_one_or_none()
+            if existing_phone and existing_phone.id != trainer.id:
+                raise DuplicateTrainerPhoneError("Trainer phone number already exists")
+            trainer.phone_number = phone_number
+
+        if "specialization" in update_data:
+            trainer.specialization = update_data["specialization"]
 
         if "full_name" in update_data and update_data["full_name"] is not None:
             trainer.full_name = update_data["full_name"]
@@ -75,6 +97,11 @@ class TrainerService:
         except Exception:
             self.db.rollback()
             raise
+
+    def get_trainer_assigned_members(self, trainer_id: int) -> list[Member]:
+        # Trainer-member mapping is not yet modeled in the database.
+        # Keep this list empty until assignment support is introduced.
+        return []
 
     def delete_trainer(self, trainer_id: int) -> None:
         trainer = self.repository.get_trainer_by_id(trainer_id)

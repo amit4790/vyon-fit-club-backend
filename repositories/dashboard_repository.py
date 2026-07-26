@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from models import Member, MembershipSubscription
+from models import User
 
 
 class DashboardRepository:
@@ -24,6 +25,13 @@ class DashboardRepository:
         statement = select(func.count(Member.id)).where(
             Member.deleted_at.is_(None),
             Member.status == "active",
+        )
+        return self.db.execute(statement).scalar_one()
+
+    def get_total_trainers(self) -> int:
+        statement = select(func.count(User.id)).where(
+            User.role.in_(["TRAINER", "trainer"]),
+            User.is_active.is_(True),
         )
         return self.db.execute(statement).scalar_one()
 

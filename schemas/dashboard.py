@@ -28,6 +28,7 @@ class AdminDashboardResponse(BaseModel):
     
     total_members: int = Field(..., description="Total number of members")
     active_members: int = Field(..., description="Currently active members")
+    total_trainers: int | None = Field(None, description="Currently active trainers")
     inactive_members: int | None = Field(None, description="Currently inactive members")
     monthly_revenue: float | None = Field(None, description="Revenue this month")
     expiring_memberships: int | None = Field(None, description="Memberships expiring this month")
@@ -39,6 +40,7 @@ class AdminDashboardResponse(BaseModel):
             "example": {
                 "total_members": 250,
                 "active_members": 185,
+                "total_trainers": 16,
                 "inactive_members": 65,
                 "monthly_revenue": None,
                 "expiring_memberships": None,

@@ -143,9 +143,11 @@ def upgrade() -> None:
             "description": "Premium plan with personal coaching and performance optimization.",
             "includes": [
                 "Everything in ADVANCE",
-                "2 personal training sessions per month",
-                "Priority support",
-                "Recovery consultation",
+                "1:1 personal training sessions",
+                "Customized diet plan",
+                "Green Tea / Black Coffee"
+                "Passive Stretching",
+                "Foot Reflexology",
             ],
             "base_price": 12000,
             "is_active": True,
@@ -160,9 +162,11 @@ def upgrade() -> None:
             "description": "Premium plan with personal coaching and performance optimization.",
             "includes": [
                 "Everything in ADVANCE",
-                "2 personal training sessions per month",
-                "Priority support",
-                "Recovery consultation",
+                "1:1 personal training sessions",
+                "Customized diet plan",
+                "Green Tea / Black Coffee"
+                "Passive Stretching",
+                "Foot Reflexology",
             ],
             "base_price": 15000,
             "is_active": True,
@@ -177,9 +181,11 @@ def upgrade() -> None:
             "description": "Premium plan with personal coaching and performance optimization.",
             "includes": [
                 "Everything in ADVANCE",
-                "2 personal training sessions per month",
-                "Priority support",
-                "Recovery consultation",
+                "1:1 personal training sessions",
+                "Customized diet plan",
+                "Green Tea / Black Coffee"
+                "Passive Stretching",
+                "Foot Reflexology",
             ],
             "base_price": 18000,
             "is_active": True,

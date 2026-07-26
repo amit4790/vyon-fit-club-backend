@@ -31,6 +31,7 @@ class DashboardService:
         """
         total_members = self.repository.get_total_members()
         active_members = self.repository.get_active_members()
+        total_trainers = self.repository.get_total_trainers()
         inactive_members = self.repository.get_inactive_members()
         expiring_memberships = self.repository.get_expiring_memberships(days=30)
         recent_members = self.repository.get_recent_registrations(limit=5)
@@ -38,6 +39,7 @@ class DashboardService:
         return AdminDashboardResponse(
             total_members=total_members,
             active_members=active_members,
+            total_trainers=total_trainers,
             inactive_members=inactive_members,
             monthly_revenue=None,
             expiring_memberships=expiring_memberships,

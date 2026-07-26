@@ -5,10 +5,13 @@ Handles admin dashboard and management endpoints.
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from database import get_db
-from dependencies import require_admin_access, require_super_admin
+from dependencies import get_current_session, require_admin_access, require_super_admin
+from models import User
+from schemas.profile import AdminProfileResponse
 from schemas.admin_user import AdminCreateRequest, AdminUserOperationResponse, AdminUserResponse
 from schemas.member import (
     MemberCreateRequest,
@@ -26,6 +29,7 @@ from schemas.invoice import (
     InvoiceOperationResponse,
     InvoiceStatusUpdateRequest,
 )
+from schemas.report import ReportsSummaryResponse
 from schemas.subscription import (
     AssignSubscriptionRequest,
     ExpiringSubscriptionsResponse,
@@ -43,8 +47,14 @@ from schemas.trainer import (
     TrainerResponse,
     TrainerUpdateRequest,
 )
+from schemas.trainer_detail import (
+    TrainerAssignedMember,
+    TrainerDetailOperationResponse,
+    TrainerDetailResponse,
+)
 from services.member_service import DuplicateMobileError, MemberNotFoundError, MemberService
 from services.admin_user_service import AdminUserService, DuplicateAdminEmailError, DuplicateAdminPhoneError
+from services.report_service import ReportService
 from services.invoice_service import (
     InvalidPaymentAmountError,
     InvalidInvoiceStatusTransitionError,
@@ -60,6 +70,7 @@ from services.subscription_service import (
 )
 from services.trainer_service import (
     DuplicateTrainerEmailError,
+    DuplicateTrainerPhoneError,
     TrainerNotFoundError,
     TrainerService,
 )
@@ -81,6 +92,26 @@ async def get_admin_dashboard():
             "occupancy_rate": "85%"
         }
     }
+
+
+@router.get("/profile", response_model=AdminProfileResponse)
+def get_admin_profile(
+    session=Depends(get_current_session),
+    db: Session = Depends(get_db),
+) -> AdminProfileResponse:
+    user = db.execute(select(User).where(User.id == int(session.user_id))).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    return AdminProfileResponse(
+        id=user.id,
+        full_name=user.full_name,
+        email=user.email,
+        phone_number=user.phone_number,
+        role=user.role,
+        is_active=user.is_active,
+        joined_date=user.created_at.isoformat(),
+    )
 
 
 @router.get("/members")
@@ -124,6 +155,32 @@ def get_members(
             page_size=page_size,
             total_items=total_items,
             total_pages=total_pages,
+        ),
+    )
+
+
+@router.get("/members/{member_id}", response_model=MemberOperationResponse)
+def get_member_by_id(member_id: int, db: Session = Depends(get_db)) -> MemberOperationResponse:
+    service = MemberService(db)
+    member = service.repository.get_member_by_id(member_id)
+    if not member:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
+
+    return MemberOperationResponse(
+        message="Member details",
+        data=MemberResponse(
+            id=member.id,
+            full_name=member.full_name,
+            mobile_number=member.mobile_number,
+            joining_date=member.joined_at,
+            status=member.status,
+            email=member.email,
+            date_of_birth=member.date_of_birth,
+            gender=member.gender,
+            address=member.address,
+            emergency_contact=member.emergency_contact,
+            emergency_phone=member.emergency_phone,
+            notes=member.notes,
         ),
     )
 
@@ -287,7 +344,36 @@ def get_member_subscriptions(member_id: int, db: Session = Depends(get_db)) -> M
     return MemberSubscriptionsResponse(message="Member subscriptions", data=subscriptions)
 
 
-@router.get("/subscriptions/{subscription_id}", response_model=SubscriptionOperationResponse)
+@router.get("/subscriptions/expiring", response_model=ExpiringSubscriptionsResponse)
+def get_expiring_subscriptions(
+    days: int = Query(7, ge=1, le=90, description="Lookahead window in days"),
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(10, ge=1, le=100, description="Items per page"),
+    db: Session = Depends(get_db),
+) -> ExpiringSubscriptionsResponse:
+    """Get active subscriptions expiring within the configured window."""
+    service = SubscriptionService(db)
+    service.sync_expired_subscriptions()
+    result = service.get_expiring_subscriptions(days=days, page=page, page_size=page_size)
+
+    total_pages = result.total_items // page_size + (1 if result.total_items % page_size else 0)
+    if result.total_items == 0:
+        total_pages = 0
+
+    return ExpiringSubscriptionsResponse(
+        message="Expiring subscriptions",
+        data=result.items,
+        pagination={
+            "page": page,
+            "page_size": page_size,
+            "total_items": result.total_items,
+            "total_pages": total_pages,
+            "days": days,
+        },
+    )
+
+
+@router.get("/subscriptions/{subscription_id:int}", response_model=SubscriptionOperationResponse)
 def get_subscription_by_id(subscription_id: int, db: Session = Depends(get_db)) -> SubscriptionOperationResponse:
     """Get a subscription record by id."""
     service = SubscriptionService(db)
@@ -327,33 +413,11 @@ def capture_subscription_payment(
     return CapturePaymentResponse(message="Payment saved successfully", data=invoice)
 
 
-@router.get("/subscriptions/expiring", response_model=ExpiringSubscriptionsResponse)
-def get_expiring_subscriptions(
-    days: int = Query(7, ge=1, le=90, description="Lookahead window in days"),
-    page: int = Query(1, ge=1, description="Page number"),
-    page_size: int = Query(10, ge=1, le=100, description="Items per page"),
-    db: Session = Depends(get_db),
-) -> ExpiringSubscriptionsResponse:
-    """Get active subscriptions expiring within the configured window."""
-    service = SubscriptionService(db)
-    service.sync_expired_subscriptions()
-    result = service.get_expiring_subscriptions(days=days, page=page, page_size=page_size)
-
-    total_pages = result.total_items // page_size + (1 if result.total_items % page_size else 0)
-    if result.total_items == 0:
-        total_pages = 0
-
-    return ExpiringSubscriptionsResponse(
-        message="Expiring subscriptions",
-        data=result.items,
-        pagination={
-            "page": page,
-            "page_size": page_size,
-            "total_items": result.total_items,
-            "total_pages": total_pages,
-            "days": days,
-        },
-    )
+@router.get("/reports/summary", response_model=ReportsSummaryResponse)
+def get_reports_summary(db: Session = Depends(get_db)) -> ReportsSummaryResponse:
+    """Get live summary metrics for reports module."""
+    summary = ReportService(db).get_summary()
+    return ReportsSummaryResponse(message="Reports summary", data=summary)
 
 
 @router.get("/invoices", response_model=InvoiceListResponse)
@@ -472,11 +536,43 @@ def get_trainers(db: Session = Depends(get_db)) -> TrainerListResponse:
                 id=trainer.id,
                 full_name=trainer.full_name,
                 email=trainer.email,
+                phone_number=trainer.phone_number,
+                specialization=trainer.specialization,
                 role=trainer.role,
                 is_active=trainer.is_active,
             )
             for trainer in trainers
         ],
+    )
+
+
+@router.get("/trainers/{trainer_id}", response_model=TrainerDetailOperationResponse)
+def get_trainer_by_id(trainer_id: int, db: Session = Depends(get_db)) -> TrainerDetailOperationResponse:
+    service = TrainerService(db)
+    trainer = service.repository.get_trainer_by_id(trainer_id)
+    if not trainer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trainer not found")
+
+    assigned_members = service.get_trainer_assigned_members(trainer_id)
+    return TrainerDetailOperationResponse(
+        message="Trainer details",
+        data=TrainerDetailResponse(
+            id=trainer.id,
+            full_name=trainer.full_name,
+            email=trainer.email,
+            phone_number=trainer.phone_number,
+            specialization=trainer.specialization,
+            role=trainer.role,
+            is_active=trainer.is_active,
+            assigned_members=[
+                TrainerAssignedMember(
+                    id=item.id,
+                    full_name=item.full_name,
+                    mobile_number=item.mobile_number,
+                )
+                for item in assigned_members
+            ],
+        ),
     )
 
 
@@ -518,6 +614,8 @@ def create_trainer(payload: TrainerCreateRequest, db: Session = Depends(get_db))
         trainer = service.create_trainer(payload)
     except DuplicateTrainerEmailError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except DuplicateTrainerPhoneError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     return TrainerOperationResponse(
         message="Trainer created successfully",
@@ -525,6 +623,8 @@ def create_trainer(payload: TrainerCreateRequest, db: Session = Depends(get_db))
             id=trainer.id,
             full_name=trainer.full_name,
             email=trainer.email,
+            phone_number=trainer.phone_number,
+            specialization=trainer.specialization,
             role=trainer.role,
             is_active=trainer.is_active,
         ),
@@ -546,6 +646,8 @@ def update_trainer(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except DuplicateTrainerEmailError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except DuplicateTrainerPhoneError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     return TrainerOperationResponse(
         message="Trainer updated successfully",
@@ -553,6 +655,8 @@ def update_trainer(
             id=trainer.id,
             full_name=trainer.full_name,
             email=trainer.email,
+            phone_number=trainer.phone_number,
+            specialization=trainer.specialization,
             role=trainer.role,
             is_active=trainer.is_active,
         ),

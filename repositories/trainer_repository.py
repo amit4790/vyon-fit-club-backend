@@ -35,6 +35,10 @@ class TrainerRepository:
         statement = select(User).where(User.email == email, self._trainer_role_filter())
         return self.db.execute(statement).scalar_one_or_none()
 
+    def get_trainer_by_phone(self, phone_number: str) -> User | None:
+        statement = select(User).where(User.phone_number == phone_number, self._trainer_role_filter())
+        return self.db.execute(statement).scalar_one_or_none()
+
     def add(self, trainer: User) -> User:
         self.db.add(trainer)
         self.db.flush()
