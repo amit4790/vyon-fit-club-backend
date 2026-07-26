@@ -8,6 +8,8 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from database import get_db
+from dependencies import require_admin_access, require_super_admin
+from schemas.admin_user import AdminCreateRequest, AdminUserOperationResponse, AdminUserResponse
 from schemas.member import (
     MemberCreateRequest,
     MemberDeleteResponse,
@@ -42,6 +44,7 @@ from schemas.trainer import (
     TrainerUpdateRequest,
 )
 from services.member_service import DuplicateMobileError, MemberNotFoundError, MemberService
+from services.admin_user_service import AdminUserService, DuplicateAdminEmailError, DuplicateAdminPhoneError
 from services.invoice_service import (
     InvalidPaymentAmountError,
     InvalidInvoiceStatusTransitionError,
@@ -61,7 +64,7 @@ from services.trainer_service import (
     TrainerService,
 )
 
-router = APIRouter(prefix="/api/admin", tags=["admin"])
+router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin_access)])
 
 
 @router.get("/dashboard")
@@ -474,6 +477,35 @@ def get_trainers(db: Session = Depends(get_db)) -> TrainerListResponse:
             )
             for trainer in trainers
         ],
+    )
+
+
+@router.post("/users/admins", response_model=AdminUserOperationResponse, status_code=status.HTTP_201_CREATED)
+def create_admin_user(
+    payload: AdminCreateRequest,
+    _session=Depends(require_super_admin),
+    db: Session = Depends(get_db),
+) -> AdminUserOperationResponse:
+    """Create a new ADMIN user (SUPER_ADMIN only)."""
+    service = AdminUserService(db)
+
+    try:
+        admin_user = service.create_admin_user(payload)
+    except DuplicateAdminEmailError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except DuplicateAdminPhoneError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    return AdminUserOperationResponse(
+        message="Admin created successfully",
+        data=AdminUserResponse(
+            id=admin_user.id,
+            full_name=admin_user.full_name,
+            email=admin_user.email,
+            phone_number=admin_user.phone_number,
+            role=admin_user.role,
+            is_active=admin_user.is_active,
+        ),
     )
 
 

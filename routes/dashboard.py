@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from database import get_db
+from dependencies import require_admin_access
 from schemas.dashboard import (
     AdminDashboardResponse,
     TrainerDashboardResponse,
@@ -23,7 +24,10 @@ router = APIRouter(prefix="/api/dashboard", tags=["Dashboard"])
     description="Get admin dashboard with system statistics",
     responses={200: {"description": "Admin dashboard data retrieved successfully"}}
 )
-def get_admin_dashboard(db: Session = Depends(get_db)) -> AdminDashboardResponse:
+def get_admin_dashboard(
+    _session=Depends(require_admin_access),
+    db: Session = Depends(get_db),
+) -> AdminDashboardResponse:
     """
     Admin dashboard endpoint
     

@@ -2,6 +2,7 @@
 
 from sqlalchemy.orm import Session
 
+from core.roles import UserRole
 from models import User
 from repositories import TrainerRepository
 from schemas.trainer import TrainerCreateRequest, TrainerUpdateRequest
@@ -33,7 +34,7 @@ class TrainerService:
         trainer = User(
             full_name=payload.full_name,
             email=str(payload.email),
-            role="trainer",
+            role=UserRole.TRAINER,
             is_active=payload.is_active,
             # Placeholder value: current auth flow uses mock users only.
             password_hash="trainer-managed-by-admin",

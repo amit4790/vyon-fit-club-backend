@@ -2,7 +2,9 @@
 Authentication Routes
 """
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+from database import get_db
 from schemas.auth import LoginRequest, LoginResponse
 from services.auth_service import AuthService
 
@@ -13,13 +15,13 @@ router = APIRouter(prefix="/api/auth", tags=["Authentication"])
     "/login",
     response_model=LoginResponse,
     summary="User Login",
-    description="Authenticate user with email and password",
+    description="Authenticate user with email or phone number and password",
     responses={
         200: {"description": "Login successful"},
         401: {"description": "Invalid credentials"}
     }
 )
-def login(credentials: LoginRequest) -> LoginResponse:
+def login(credentials: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
     """
     Login endpoint for user authentication
     
@@ -27,13 +29,14 @@ def login(credentials: LoginRequest) -> LoginResponse:
         credentials: LoginRequest with email and password
     
     Returns:
-        LoginResponse: User information and mock JWT token
+        LoginResponse: Authenticated user information and token
     
     Raises:
         HTTPException: 401 if credentials are invalid
     """
     success, user_info, error_message = AuthService.authenticate(
-        credentials.email,
+        db,
+        credentials.identifier,
         credentials.password
     )
     
@@ -43,7 +46,7 @@ def login(credentials: LoginRequest) -> LoginResponse:
             detail=error_message or "Invalid credentials"
         )
     
-    token = AuthService.generate_mock_token(user_info.id)
+    token = AuthService.create_session(user_info)
     
     return LoginResponse(
         success=True,
