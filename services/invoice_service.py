@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from decimal import Decimal, ROUND_HALF_UP
+from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -165,6 +166,8 @@ class InvoiceService:
                 InvoicePdfPayload(
                     invoice_number=invoice_number,
                     invoice_date=payload.payment_date,
+                    invoice_time=datetime.now().strftime("%I:%M %p"),
+                    member_id=str(subscription.member_id),
                     member_name=subscription.member.full_name,
                     member_phone=subscription.member.mobile_number,
                     member_email=subscription.member.email,
@@ -180,6 +183,9 @@ class InvoiceService:
                     payment_mode=payload.payment_mode,
                     transaction_reference=payload.transaction_reference,
                     payment_status=invoice.status,
+                    remarks=payload.notes,
+                    created_by="System",
+                    counsellor="System",
                 )
             )
 

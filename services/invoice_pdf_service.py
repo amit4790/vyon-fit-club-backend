@@ -12,6 +12,8 @@ from pathlib import Path
 class InvoicePdfPayload:
     invoice_number: str
     invoice_date: date
+    invoice_time: str
+    member_id: str
     member_name: str
     member_phone: str | None
     member_email: str | None
@@ -27,6 +29,9 @@ class InvoicePdfPayload:
     payment_mode: str
     transaction_reference: str | None
     payment_status: str = "paid"
+    remarks: str | None = None
+    created_by: str | None = None
+    counsellor: str | None = None
 
 
 @dataclass(frozen=True)
@@ -38,17 +43,29 @@ class GymInvoiceProfile:
     phone: str
     email: str
     gstin_label: str
+    pan_label: str
 
 
 DEFAULT_GYM_INVOICE_PROFILE = GymInvoiceProfile(
     logo_text="VYON",
-    gym_name="VYON Premium Fitness Club",
-    tagline="Elevate Your Limits",
-    address="Address: Placeholder",
-    phone="Phone: Placeholder",
-    email="Email: Placeholder",
-    gstin_label="GSTIN : Applied For",
+    gym_name="VYON Fit Club",
+    tagline="Membership Invoice",
+    address="Address: Update from business profile",
+    phone="Phone: Update from business profile",
+    email="Email: update@vyonfitclub.com",
+    gstin_label="GST No.: Applied For",
+    pan_label="PAN No.: Applied For",
 )
+
+
+DEFAULT_RULES_AND_REGULATIONS: list[str] = [
+    "Fees once paid are non-refundable and are required to be paid in advance at the time of enrollment.",
+    "Equipment must be used carefully. Any damage caused due to misuse may be charged to the member.",
+    "Members should consult a physician before joining and are responsible for disclosing relevant medical history.",
+    "Membership can be paused only in approved cases with valid supporting documents.",
+    "Discounted or complimentary months cannot be paused, carried forward, or converted to cash.",
+    "The management reserves the right to modify or update these terms and conditions as needed.",
+]
 
 
 class InvoicePdfService:
@@ -90,6 +107,19 @@ class InvoicePdfService:
     @staticmethod
     def _display_payment_mode(payment_mode: str) -> str:
         return payment_mode.replace("_", " ").title()
+
+    @staticmethod
+    def _display_payment_status(payment_status: str) -> str:
+        normalized = payment_status.strip().lower()
+        if normalized == "paid":
+            return "PAID"
+        if normalized == "pending":
+            return "PENDING"
+        if normalized == "failed":
+            return "FAILED"
+        if normalized == "cancelled":
+            return "CANCELLED"
+        return normalized.upper()
 
     @staticmethod
     def _status_badge(status: str) -> tuple[str, tuple[float, float, float], tuple[float, float, float]]:
@@ -155,12 +185,29 @@ class InvoicePdfService:
             "S",
         ]
 
+    def _wrap_text(self, text: str, max_chars: int) -> list[str]:
+        words = self._safe_text(text, fallback="").split()
+        if not words:
+            return ["-"]
+
+        lines: list[str] = []
+        current = words[0]
+        for word in words[1:]:
+            candidate = f"{current} {word}"
+            if len(candidate) <= max_chars:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+        return lines
+
     def _build_invoice_stream(self, payload: InvoicePdfPayload) -> bytes:
         stream: list[str] = []
 
         page_w = 595.0
         page_h = 842.0
-        margin = 36.0
+        margin = 34.0
         content_w = page_w - (2 * margin)
 
         primary = (0.79, 0.16, 0.29)
@@ -168,50 +215,53 @@ class InvoicePdfService:
         text_muted = (0.40, 0.40, 0.40)
         border = (0.85, 0.85, 0.85)
         panel_bg = (0.98, 0.98, 0.98)
+        success_bg = (0.90, 0.95, 0.90)
+        success_text = (0.10, 0.45, 0.20)
 
         top = page_h - margin
 
         # Header container
-        header_h = 150.0
+        header_h = 128.0
         header_y = top - header_h
         stream.extend(self._cmd_rect(margin, header_y, content_w, header_h, fill=(1, 1, 1), stroke=border))
 
         # Logo block
-        logo_size = 50.0
-        logo_x = margin + 16
+        logo_size = 54.0
+        logo_x = margin + 14
         logo_y = top - 66
-        stream.extend(self._cmd_rect(logo_x, logo_y, logo_size, logo_size, fill=primary))
-        stream.extend(self._cmd_text(logo_x + 8, logo_y + 20, self.gym_profile.logo_text, size=14, bold=True, color=(1, 1, 1)))
+        stream.extend(self._cmd_rect(logo_x, logo_y, logo_size, logo_size, fill=primary, stroke=primary))
+        stream.extend(self._cmd_text(logo_x + 6, logo_y + 22, self.gym_profile.logo_text, size=16, bold=True, color=(1, 1, 1)))
 
         left_x = logo_x + logo_size + 14
-        stream.extend(self._cmd_text(left_x, top - 32, self.gym_profile.gym_name, size=16, bold=True, color=text_dark))
-        stream.extend(self._cmd_text(left_x, top - 50, f'"{self.gym_profile.tagline}"', size=10, color=text_muted))
-        stream.extend(self._cmd_text(left_x, top - 68, self.gym_profile.address, size=10, color=text_muted))
-        stream.extend(self._cmd_text(left_x, top - 83, self.gym_profile.phone, size=10, color=text_muted))
-        stream.extend(self._cmd_text(left_x, top - 98, self.gym_profile.email, size=10, color=text_muted))
-        stream.extend(self._cmd_text(left_x, top - 113, self.gym_profile.gstin_label, size=10, bold=True, color=text_dark))
+        stream.extend(self._cmd_text(left_x, top - 30, self.gym_profile.gym_name, size=17, bold=True, color=text_dark))
+        stream.extend(self._cmd_text(left_x, top - 48, self.gym_profile.tagline, size=10, color=primary))
+        stream.extend(self._cmd_text(left_x, top - 66, self.gym_profile.address, size=10, color=text_muted))
+        stream.extend(self._cmd_text(left_x, top - 81, self.gym_profile.phone, size=10, color=text_muted))
+        stream.extend(self._cmd_text(left_x, top - 96, self.gym_profile.email, size=10, color=text_muted))
+        stream.extend(self._cmd_text(left_x, top - 111, self.gym_profile.gstin_label, size=10, bold=True, color=text_dark))
 
         # Invoice meta (right)
-        right_box_w = 195.0
-        right_box_h = 118.0
+        right_box_w = 205.0
+        right_box_h = 104.0
         right_x = margin + content_w - right_box_w - 16
         right_y = top - right_box_h - 16
         stream.extend(self._cmd_rect(right_x, right_y, right_box_w, right_box_h, fill=panel_bg, stroke=border))
-        stream.extend(self._cmd_text(right_x + 12, right_y + right_box_h - 24, "INVOICE", size=13, bold=True, color=primary))
-        stream.extend(self._cmd_text(right_x + 12, right_y + right_box_h - 42, f"Invoice No: {payload.invoice_number}", size=10, color=text_dark))
+        stream.extend(self._cmd_text(right_x + 12, right_y + right_box_h - 22, "RENEWAL INVOICE", size=13, bold=True, color=primary))
+        stream.extend(self._cmd_text(right_x + 12, right_y + right_box_h - 40, f"Invoice No.: {payload.invoice_number}", size=10, color=text_dark))
         stream.extend(self._cmd_text(
             right_x + 12,
-            right_y + right_box_h - 58,
+            right_y + right_box_h - 56,
             f"Invoice Date: {self._display_date(payload.invoice_date)}",
             size=10,
             color=text_dark,
         ))
+        stream.extend(self._cmd_text(right_x + 12, right_y + right_box_h - 72, f"Invoice Time: {self._safe_text(payload.invoice_time)}", size=10, color=text_dark))
 
         badge_text, badge_bg, badge_fg = self._status_badge(payload.payment_status)
-        badge_w = 72.0
+        badge_w = 80.0
         badge_h = 20.0
         badge_x = right_x + 12
-        badge_y = right_y + 16
+        badge_y = right_y + 14
         stream.extend(self._cmd_rect(badge_x, badge_y, badge_w, badge_h, fill=badge_bg, stroke=badge_bg))
         stream.extend(self._cmd_text(badge_x + 12, badge_y + 6, badge_text, size=9, bold=True, color=badge_fg))
 
@@ -223,30 +273,31 @@ class InvoicePdfService:
             stream.extend(self._cmd_line(margin, y - 6, margin + content_w, y - 6, color=border, width=0.8))
             y -= 22
 
-        # Member Details
-        section_title("MEMBER DETAILS")
+        # Bill To
+        section_title("BILL TO")
         stream.extend(self._cmd_text(margin, y, f"Member Name: {self._safe_text(payload.member_name)}", size=10, color=text_dark))
-        stream.extend(self._cmd_text(margin + 265, y, f"Phone Number: {self._safe_text(payload.member_phone)}", size=10, color=text_dark))
+        stream.extend(self._cmd_text(margin + 290, y, f"Member ID: {self._safe_text(payload.member_id)}", size=10, color=text_dark))
         y -= 16
-        stream.extend(self._cmd_text(margin, y, f"Email Address: {self._safe_text(payload.member_email)}", size=10, color=text_dark))
+        stream.extend(self._cmd_text(margin, y, f"Email: {self._safe_text(payload.member_email)}", size=10, color=text_dark))
+        stream.extend(self._cmd_text(margin + 290, y, f"Phone: {self._safe_text(payload.member_phone)}", size=10, color=text_dark))
         y -= 24
 
         # Membership Details
         section_title("MEMBERSHIP DETAILS")
-        stream.extend(self._cmd_text(margin, y, f"Membership Plan: {self._safe_text(payload.plan_label)}", size=10, color=text_dark))
+        stream.extend(self._cmd_text(margin, y, f"Subscription Name: {self._safe_text(payload.plan_label)}", size=10, color=text_dark))
         stream.extend(self._cmd_text(margin + 290, y, f"Duration: {self._safe_text(payload.duration_label)}", size=10, color=text_dark))
         y -= 16
         stream.extend(self._cmd_text(
             margin,
             y,
-            f"Membership Start Date: {self._display_date(payload.start_date)}",
+            f"From Date: {self._display_date(payload.start_date)}",
             size=10,
             color=text_dark,
         ))
         stream.extend(self._cmd_text(
             margin + 290,
             y,
-            f"Membership End Date: {self._display_date(payload.end_date)}",
+            f"To Date: {self._display_date(payload.end_date)}",
             size=10,
             color=text_dark,
         ))
@@ -320,7 +371,7 @@ class InvoicePdfService:
         cursor_y = breakdown_y + breakdown_h - 22
         for index, (label, amount, highlight) in enumerate(breakdown_rows):
             if highlight:
-                stream.extend(self._cmd_rect(breakdown_x + 1, cursor_y - 5, breakdown_w - 2, 22, fill=(0.90, 0.95, 0.90)))
+                stream.extend(self._cmd_rect(breakdown_x + 1, cursor_y - 5, breakdown_w - 2, 22, fill=success_bg))
 
             stream.extend(self._cmd_text(
                 breakdown_x + 12,
@@ -336,27 +387,57 @@ class InvoicePdfService:
                 amount,
                 size=10,
                 bold=highlight,
-                color=(0.11, 0.37, 0.17) if highlight else text_dark,
+                color=success_text if highlight else text_dark,
             ))
 
             if index < len(breakdown_rows) - 1:
                 stream.extend(self._cmd_text(breakdown_x + (breakdown_w / 2) - 4, cursor_y - 15, "v", size=10, color=text_muted))
             cursor_y -= 26
 
+        y = breakdown_y - 18
+
+        # Staff and remarks
+        section_title("STAFF DETAILS")
+        created_by = self._safe_text(payload.created_by)
+        counsellor = self._safe_text(payload.counsellor)
+        stream.extend(self._cmd_text(margin, y, f"Created By: {created_by}", size=10, color=text_dark))
+        stream.extend(self._cmd_text(margin + 290, y, f"Counsellor: {counsellor}", size=10, color=text_dark))
+        y -= 24
+
+        if payload.remarks:
+            section_title("REMARKS")
+            remark_lines = self._wrap_text(payload.remarks, 88)
+            for line in remark_lines[:3]:
+                stream.extend(self._cmd_text(margin, y, line, size=10, color=text_dark))
+                y -= 14
+            y -= 8
+
+        section_title("RULES & REGULATIONS")
+        for index, rule in enumerate(DEFAULT_RULES_AND_REGULATIONS, start=1):
+            rule_lines = self._wrap_text(rule, 82)
+            first_line = f"{index}. {rule_lines[0]}"
+            stream.extend(self._cmd_text(margin, y, first_line, size=8, color=text_dark))
+            y -= 12
+            for line in rule_lines[1:]:
+                stream.extend(self._cmd_text(margin + 16, y, line, size=8, color=text_dark))
+                y -= 12
+            y -= 2
+
         # Footer
-        footer_y = 78.0
-        stream.extend(self._cmd_line(margin, footer_y + 32, margin + content_w, footer_y + 32, color=border, width=0.8))
-        stream.extend(self._cmd_text(margin, footer_y + 14, "Thank you for choosing VYON Premium Fitness Club.", size=10, bold=True, color=text_dark))
-        stream.extend(self._cmd_text(margin, footer_y, "Keep pushing your limits!", size=10, color=text_dark))
+        footer_y = 46.0
+        stream.extend(self._cmd_line(margin, footer_y + 30, margin + content_w, footer_y + 30, color=border, width=0.8))
+        stream.extend(self._cmd_text(margin, footer_y + 14, f"For {self.gym_profile.gym_name}", size=10, bold=True, color=text_dark))
+        stream.extend(self._cmd_text(margin, footer_y, "This is a computer-generated invoice and does not require a signature.", size=9, color=text_muted))
         stream.extend(
             self._cmd_text(
                 margin,
-                footer_y - 18,
-                "This is a computer-generated invoice and does not require a signature.",
+                footer_y - 14,
+                self.gym_profile.pan_label,
                 size=9,
                 color=text_muted,
             )
         )
+        stream.extend(self._cmd_text(margin + 250, footer_y - 14, self.gym_profile.gstin_label, size=9, color=text_muted))
 
         return "\n".join(stream).encode("latin-1", errors="replace")
 
