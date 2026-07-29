@@ -3,10 +3,10 @@
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
-InvoiceStatus = Literal["pending", "paid", "failed", "cancelled"]
+InvoiceStatus = Literal["pending", "partial", "paid", "failed", "cancelled"]
 DeliveryStatus = Literal["sent", "skipped"]
 
 
@@ -33,10 +33,13 @@ class InvoiceResponse(BaseModel):
     discount_amount: float | None
     discount_percentage: float | None
     gst_amount: float | None
+    amount_paid_today: float | None
+    outstanding_balance: float | None
     total_paid: float | None
     payment_mode: str | None
     transaction_reference: str | None
     payment_date: date | None
+    counsellor: str | None
     notes: str | None
     invoice_download_url: str | None
     status: InvoiceStatus
@@ -65,10 +68,18 @@ PaymentMode = Literal["cash", "upi", "card", "bank_transfer"]
 
 class CapturePaymentRequest(BaseModel):
     final_amount_received: float = Field(..., gt=0)
+    amount_paid_today: float = Field(..., gt=0)
     payment_mode: PaymentMode
     transaction_reference: str | None = Field(default=None, max_length=120)
     payment_date: date = Field(default_factory=date.today)
+    counsellor: str | None = Field(default=None, max_length=120)
     notes: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_amounts(self) -> "CapturePaymentRequest":
+        if self.amount_paid_today > self.final_amount_received:
+            raise ValueError("Amount Paid Today cannot exceed Final Amount Payable")
+        return self
 
 
 class CapturePaymentResponse(BaseModel):

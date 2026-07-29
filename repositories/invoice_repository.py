@@ -85,6 +85,9 @@ class InvoiceRepository:
         paid_invoices = self.db.execute(
             select(func.count(Invoice.id)).where(Invoice.status == "paid")
         ).scalar_one()
+        partial_invoices = self.db.execute(
+            select(func.count(Invoice.id)).where(Invoice.status == "partial")
+        ).scalar_one()
         pending_invoices = self.db.execute(
             select(func.count(Invoice.id)).where(Invoice.status == "pending")
         ).scalar_one()
@@ -102,7 +105,7 @@ class InvoiceRepository:
         return {
             "total_invoices": int(total_invoices or 0),
             "paid_invoices": int(paid_invoices or 0),
-            "pending_invoices": int(pending_invoices or 0),
+            "pending_invoices": int((pending_invoices or 0) + (partial_invoices or 0)),
             "collected_revenue": float(collected_revenue or 0),
             "pending_revenue": float(pending_revenue or 0),
             "average_invoice_value": float(average_invoice_value or 0),
@@ -111,13 +114,21 @@ class InvoiceRepository:
     def update_status(self, invoice: Invoice, status: str) -> Invoice:
         invoice.status = status
         if status == "paid":
+            if invoice.final_amount_received is not None:
+                invoice.total_paid = invoice.final_amount_received
+                invoice.amount_paid_today = invoice.final_amount_received
+                invoice.outstanding_balance = 0
+            invoice.amount = float(invoice.final_amount_received or invoice.amount)
             invoice.paid_at = datetime.now(timezone.utc)
             if invoice.subscription:
                 invoice.subscription.payment_status = "paid"
         else:
             invoice.paid_at = None
-            if invoice.subscription and invoice.subscription.payment_status == "paid":
-                invoice.subscription.payment_status = "pending"
+            if invoice.subscription:
+                if status == "partial":
+                    invoice.subscription.payment_status = "partial"
+                elif invoice.subscription.payment_status == "paid":
+                    invoice.subscription.payment_status = "pending"
 
         self.db.flush()
         self.db.refresh(invoice)
@@ -133,12 +144,16 @@ class InvoiceRepository:
         discount_amount: float,
         discount_percentage: float,
         gst_amount: float,
+        amount_paid_today: float,
+        outstanding_balance: float,
         total_paid: float,
         payment_mode: str,
         transaction_reference: str | None,
         payment_date,
+        counsellor: str | None,
         notes: str | None,
         invoice_pdf_path: str | None,
+        status: str,
     ) -> Invoice:
         invoice.invoice_number = invoice_number
         invoice.original_price = original_price
@@ -146,18 +161,26 @@ class InvoiceRepository:
         invoice.discount_amount = discount_amount
         invoice.discount_percentage = discount_percentage
         invoice.gst_amount = gst_amount
+        invoice.amount_paid_today = amount_paid_today
+        invoice.outstanding_balance = outstanding_balance
         invoice.total_paid = total_paid
         invoice.payment_mode = payment_mode
         invoice.transaction_reference = transaction_reference
         invoice.payment_date = payment_date
+        invoice.counsellor = counsellor
         invoice.notes = notes
         invoice.invoice_pdf_path = invoice_pdf_path
-        invoice.amount = total_paid
-        invoice.status = "paid"
-        invoice.paid_at = datetime.now(timezone.utc)
+        invoice.amount = final_amount_received
+        invoice.status = status
+        invoice.paid_at = datetime.now(timezone.utc) if status == "paid" else None
 
         if invoice.subscription:
-            invoice.subscription.payment_status = "paid"
+            if status == "paid":
+                invoice.subscription.payment_status = "paid"
+            elif status == "partial":
+                invoice.subscription.payment_status = "partial"
+            else:
+                invoice.subscription.payment_status = "pending"
 
         self.db.flush()
         self.db.refresh(invoice)

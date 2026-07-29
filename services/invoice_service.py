@@ -132,16 +132,28 @@ class InvoiceService:
 
         original_price = self._money(subscription.base_price)
         final_amount = self._money(payload.final_amount_received)
+        amount_paid_today = self._money(payload.amount_paid_today)
 
         if final_amount > original_price:
-            raise InvalidPaymentAmountError("Final Amount Received cannot exceed Original Membership Price")
+            raise InvalidPaymentAmountError("Final Amount Payable cannot exceed Original Membership Price")
+
+        if amount_paid_today > final_amount:
+            raise InvalidPaymentAmountError("Amount Paid Today cannot exceed Final Amount Payable")
 
         discount_amount = self._money(original_price - final_amount)
         discount_percentage = self._money(
             (discount_amount / original_price) * Decimal("100") if original_price > 0 else Decimal("0")
         )
-        gst_amount = self._money(final_amount * Decimal("0.05"))
-        total_paid = self._money(final_amount + gst_amount)
+
+        GST_RATE = Decimal("0.05")
+
+        # Final amount payable is GST inclusive.
+        taxable_amount = self._money(final_amount / (Decimal("1.00") + GST_RATE))
+        gst_amount = self._money(final_amount - taxable_amount)
+        outstanding_balance = self._money(final_amount - amount_paid_today)
+        total_paid = amount_paid_today
+        invoice_status = "paid" if outstanding_balance == Decimal("0.00") else "partial"
+        pdf_payment_status = "paid" if outstanding_balance == Decimal("0.00") else "partial"
 
         invoice_number = invoice.invoice_number or self._build_invoice_number(invoice.id)
 
@@ -154,12 +166,16 @@ class InvoiceService:
                 discount_amount=float(discount_amount),
                 discount_percentage=float(discount_percentage),
                 gst_amount=float(gst_amount),
+                amount_paid_today=float(amount_paid_today),
+                outstanding_balance=float(outstanding_balance),
                 total_paid=float(total_paid),
                 payment_mode=payload.payment_mode,
                 transaction_reference=payload.transaction_reference,
                 payment_date=payload.payment_date,
+                counsellor=payload.counsellor,
                 notes=payload.notes,
                 invoice_pdf_path=invoice.invoice_pdf_path,
+                status=invoice_status,
             )
 
             pdf_path = self.pdf_service.render_invoice_pdf(
@@ -177,15 +193,17 @@ class InvoiceService:
                     end_date=subscription.end_date,
                     original_price=float(original_price),
                     discount_amount=float(discount_amount),
-                    taxable_amount=float(final_amount),
+                    taxable_amount=float(taxable_amount),
                     gst_amount=float(gst_amount),
-                    total_paid=float(total_paid),
+                    final_amount_payable=float(final_amount),
+                    amount_paid=float(amount_paid_today),
+                    outstanding_balance=float(outstanding_balance),
                     payment_mode=payload.payment_mode,
                     transaction_reference=payload.transaction_reference,
-                    payment_status=invoice.status,
+                    payment_status=pdf_payment_status,
                     remarks=payload.notes,
                     created_by="System",
-                    counsellor="System",
+                    counsellor=payload.counsellor,
                 )
             )
 
@@ -235,10 +253,13 @@ class InvoiceService:
             discount_amount=float(row.discount_amount) if row.discount_amount is not None else None,
             discount_percentage=float(row.discount_percentage) if row.discount_percentage is not None else None,
             gst_amount=float(row.gst_amount) if row.gst_amount is not None else None,
+            amount_paid_today=float(row.amount_paid_today) if row.amount_paid_today is not None else None,
+            outstanding_balance=float(row.outstanding_balance) if row.outstanding_balance is not None else None,
             total_paid=float(row.total_paid) if row.total_paid is not None else None,
             payment_mode=row.payment_mode,
             transaction_reference=row.transaction_reference,
             payment_date=row.payment_date,
+            counsellor=row.counsellor,
             notes=row.notes,
             invoice_download_url=f"/api/admin/invoices/{row.id}/download" if row.invoice_pdf_path else None,
             status=row.status,
