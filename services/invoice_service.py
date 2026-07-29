@@ -6,7 +6,8 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from decimal import Decimal, ROUND_HALF_UP
-from datetime import datetime
+from datetime import datetime, timedelta
+from calendar import monthrange
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -51,6 +52,61 @@ class InvoiceService:
     @staticmethod
     def _build_invoice_number(invoice_id: int) -> str:
         return f"VYON-{invoice_id:06d}"
+
+    @staticmethod
+    def _add_months(start_date, months: int):
+        month = start_date.month - 1 + months
+        year = start_date.year + month // 12
+        month = month % 12 + 1
+        day = min(start_date.day, monthrange(year, month)[1])
+        return start_date.replace(year=year, month=month, day=day)
+
+    @staticmethod
+    def _format_duration_label(duration_value: int, duration_unit: str) -> str:
+        if duration_unit == "months":
+            unit_label = "Month" if duration_value == 1 else "Months"
+        else:
+            unit_label = "Day" if duration_value == 1 else "Days"
+        return f"{duration_value} {unit_label}"
+
+    def _resolve_subscription_duration_label(self, subscription) -> str:
+        plan = subscription.plan
+        if not plan:
+            total_days = max((subscription.end_date - subscription.start_date).days + 1, 1)
+            return self._format_duration_label(total_days, "days")
+
+        default_end_date = self._add_months(subscription.start_date, plan.duration_months)
+        default_end_date = default_end_date - timedelta(days=1)
+        if subscription.end_date == default_end_date:
+            return plan.duration_label
+
+        total_days = max((subscription.end_date - subscription.start_date).days + 1, 1)
+        return self._format_duration_label(total_days, "days")
+
+    @staticmethod
+    def _resolve_subscription_name(subscription) -> str:
+        plan = subscription.plan
+        if not plan:
+            return "-"
+
+        name = (plan.name or "").strip()
+        duration_label = (plan.duration_label or "").strip()
+
+        if name and duration_label:
+            suffix = f" - {duration_label}"
+            if name.casefold().endswith(suffix.casefold()):
+                trimmed = name[: -len(suffix)].strip()
+                if trimmed:
+                    return trimmed
+
+        if name:
+            return name
+
+        family = (plan.family_name or "").strip().upper()
+        variant = (plan.variant_name or "").strip()
+        if family and variant:
+            return f"{family} - {variant}"
+        return family or "-"
 
     def list_invoices(
         self,
@@ -156,6 +212,8 @@ class InvoiceService:
         pdf_payment_status = "paid" if outstanding_balance == Decimal("0.00") else "partial"
 
         invoice_number = invoice.invoice_number or self._build_invoice_number(invoice.id)
+        subscription_name = self._resolve_subscription_name(subscription)
+        subscription_duration = self._resolve_subscription_duration_label(subscription)
 
         try:
             self.repo.save_payment_snapshot(
@@ -187,8 +245,8 @@ class InvoiceService:
                     member_name=subscription.member.full_name,
                     member_phone=subscription.member.mobile_number,
                     member_email=subscription.member.email,
-                    plan_label=subscription.plan.name,
-                    duration_label=subscription.plan.duration_label,
+                    plan_label=subscription_name,
+                    duration_label=subscription_duration,
                     start_date=subscription.start_date,
                     end_date=subscription.end_date,
                     original_price=float(original_price),
@@ -234,8 +292,7 @@ class InvoiceService:
     def delivery_results_to_dict(results: list[DeliveryResult]) -> list[dict]:
         return [asdict(item) for item in results]
 
-    @staticmethod
-    def _to_invoice_response(row) -> InvoiceResponse:
+    def _to_invoice_response(self, row) -> InvoiceResponse:
         member = row.member
         subscription = row.subscription
         return InvoiceResponse(
@@ -246,7 +303,7 @@ class InvoiceService:
             member_email=member.email,
             member_phone=member.phone,
             subscription_id=row.subscription_id,
-            plan_label=subscription.plan.name,
+            plan_label=self._resolve_subscription_name(subscription),
             amount=float(row.amount),
             original_price=float(row.original_price) if row.original_price is not None else None,
             final_amount_received=float(row.final_amount_received) if row.final_amount_received is not None else None,

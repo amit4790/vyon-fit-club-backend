@@ -3,7 +3,9 @@ Subscription and Membership Plan Schemas
 """
 
 from datetime import date
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
 
 
 class PlanOptionResponse(BaseModel):
@@ -44,6 +46,14 @@ class PlanOptionOperationResponse(BaseModel):
 class AssignSubscriptionRequest(BaseModel):
     plan_id: int = Field(..., ge=1)
     start_date: date = Field(default_factory=date.today)
+    duration_value: int | None = Field(default=None, gt=0)
+    duration_unit: Literal["months", "days"] | None = None
+
+    @model_validator(mode="after")
+    def validate_duration_fields(self) -> "AssignSubscriptionRequest":
+        if (self.duration_value is None) != (self.duration_unit is None):
+            raise ValueError("Duration value and unit must be provided together")
+        return self
 
 
 class SubscriptionResponse(BaseModel):

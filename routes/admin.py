@@ -316,6 +316,8 @@ def assign_member_subscription(
             member_id=member_id,
             plan_id=payload.plan_id,
             start_date=payload.start_date,
+            duration_value=payload.duration_value,
+            duration_unit=payload.duration_unit,
         )
     except SubscriptionMemberNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

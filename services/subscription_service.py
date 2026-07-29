@@ -63,6 +63,30 @@ class SubscriptionService:
         day = min(start_date.day, monthrange(year, month)[1])
         return date(year, month, day)
 
+    @staticmethod
+    def _format_duration_label(duration_value: int, duration_unit: str) -> str:
+        unit_label = "Month" if duration_unit == "months" and duration_value == 1 else (
+            "Months" if duration_unit == "months" else ("Day" if duration_value == 1 else "Days")
+        )
+        return f"{duration_value} {unit_label}"
+
+    def _calculate_end_date(self, *, start_date: date, duration_value: int, duration_unit: str) -> date:
+        if duration_unit == "months":
+            return self._add_months(start_date, duration_value) - timedelta(days=1)
+        return start_date + timedelta(days=duration_value - 1)
+
+    def _resolve_duration_label(self, row: MembershipSubscription) -> str:
+        if row.plan is None:
+            total_days = (row.end_date - row.start_date).days + 1
+            return self._format_duration_label(max(total_days, 1), "days")
+
+        default_end_date = self._add_months(row.start_date, row.plan.duration_months) - timedelta(days=1)
+        if row.end_date == default_end_date:
+            return row.plan.duration_label
+
+        total_days = (row.end_date - row.start_date).days + 1
+        return self._format_duration_label(max(total_days, 1), "days")
+
     def sync_expired_subscriptions(self) -> None:
         today = date.today()
         expired = self.repo.list_expired_subscriptions(today=today)
@@ -169,6 +193,8 @@ class SubscriptionService:
         member_id: int,
         plan_id: int,
         start_date: date,
+        duration_value: int | None = None,
+        duration_unit: str | None = None,
     ) -> tuple[SubscriptionResponse, list[dict]]:
         member = self.repo.get_member_by_id(member_id)
         if not member:
@@ -187,7 +213,13 @@ class SubscriptionService:
         tax_amount = self._to_money(base_price * tax_percent / Decimal("100"))
         total_amount = self._to_money(base_price + tax_amount)
 
-        end_date = self._add_months(start_date, plan.duration_months) - timedelta(days=1)
+        effective_duration_value = duration_value if duration_value is not None else plan.duration_months
+        effective_duration_unit = duration_unit if duration_unit is not None else "months"
+        end_date = self._calculate_end_date(
+            start_date=start_date,
+            duration_value=effective_duration_value,
+            duration_unit=effective_duration_unit,
+        )
 
         row = MembershipSubscription(
             member_id=member_id,
@@ -238,7 +270,10 @@ class SubscriptionService:
         )
 
         notifications = [asdict(item) for item in [*welcome_results, *invoice_results]]
-        return self._to_subscription_response(row), notifications
+        return self._to_subscription_response(
+            row,
+            duration_label_override=self._format_duration_label(effective_duration_value, effective_duration_unit),
+        ), notifications
 
     def get_member_subscriptions(self, member_id: int) -> list[SubscriptionResponse]:
         member = self.repo.get_member_by_id(member_id)
@@ -264,9 +299,13 @@ class SubscriptionService:
             total_items=total_items,
         )
 
-    @staticmethod
-    def _to_subscription_response(row: MembershipSubscription) -> SubscriptionResponse:
+    def _to_subscription_response(
+        self,
+        row: MembershipSubscription,
+        duration_label_override: str | None = None,
+    ) -> SubscriptionResponse:
         plan = row.plan
+        duration_label = duration_label_override or self._resolve_duration_label(row)
         return SubscriptionResponse(
             id=row.id,
             member_id=row.member_id,
@@ -275,7 +314,7 @@ class SubscriptionService:
             plan_family=plan.family_name.upper(),
             plan_variant=plan.variant_name,
             plan_label=plan.name,
-            duration_label=plan.duration_label,
+            duration_label=duration_label,
             start_date=row.start_date,
             end_date=row.end_date,
             status=row.status,
