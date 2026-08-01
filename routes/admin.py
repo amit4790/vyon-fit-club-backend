@@ -13,6 +13,18 @@ from dependencies import get_current_session, require_admin_access, require_supe
 from models import User
 from schemas.profile import AdminProfileResponse
 from schemas.admin_user import AdminCreateRequest, AdminUserOperationResponse, AdminUserResponse
+from schemas.device import (
+    DeviceAttendanceRecordResponse,
+    DeviceAttendanceResponse,
+    DeviceStatusData,
+    DeviceStatusResponse,
+    DeviceUserResponse,
+    DeviceUsersResponse,
+    MemberDeviceMappingData,
+    MemberDeviceMappingRequest,
+    MemberDeviceMappingResponse,
+    MemberDeviceUnlinkRequest,
+)
 from schemas.member import (
     MemberCreateRequest,
     MemberDeleteResponse,
@@ -52,8 +64,22 @@ from schemas.trainer_detail import (
     TrainerDetailOperationResponse,
     TrainerDetailResponse,
 )
-from services.member_service import DuplicateMobileError, MemberNotFoundError, MemberService
+from services.member_service import (
+    DuplicateDeviceIdentifierError,
+    DuplicateMobileError,
+    InvalidDeviceMappingError,
+    MemberNotFoundError,
+    MemberService,
+)
 from services.admin_user_service import AdminUserService, DuplicateAdminEmailError, DuplicateAdminPhoneError
+from services.device_service import (
+    DeviceConnectionError,
+    DeviceDependencyError,
+    DeviceNotFoundError,
+    DeviceOperationError,
+    DeviceService,
+    DeviceValidationError,
+)
 from services.report_service import ReportService
 from services.invoice_service import (
     InvalidPaymentAmountError,
@@ -76,6 +102,50 @@ from services.trainer_service import (
 )
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin_access)])
+
+
+def _raise_device_http_exception(exc: Exception) -> None:
+    if isinstance(exc, DeviceValidationError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    if isinstance(exc, DeviceNotFoundError):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+def _to_member_response(member) -> MemberResponse:
+    return MemberResponse(
+        id=member.id,
+        full_name=member.full_name,
+        mobile_number=member.mobile_number,
+        joining_date=member.joined_at,
+        status=member.status,
+        email=member.email,
+        date_of_birth=member.date_of_birth,
+        gender=member.gender,
+        address=member.address,
+        emergency_contact=member.emergency_contact,
+        emergency_phone=member.emergency_phone,
+        notes=member.notes,
+        device_user_id=member.device_user_id,
+        device_uid=member.device_uid,
+        device_card=member.device_card,
+        device_sync_status=member.device_sync_status,
+    )
+
+
+def _to_member_device_mapping_response(member, message: str) -> MemberDeviceMappingResponse:
+    return MemberDeviceMappingResponse(
+        message=message,
+        data=MemberDeviceMappingData(
+            member_id=member.id,
+            device_user_id=member.device_user_id,
+            device_uid=member.device_uid,
+            device_card=member.device_card,
+            device_sync_status=member.device_sync_status,
+            last_device_sync_at=member.last_device_sync_at,
+        ),
+    )
 
 
 @router.get("/dashboard")
@@ -114,6 +184,209 @@ def get_admin_profile(
     )
 
 
+@router.get("/device/status", response_model=DeviceStatusResponse)
+def get_device_status() -> DeviceStatusResponse:
+    """Return live connection and device metadata for the configured ZKTeco device."""
+    service = DeviceService()
+
+    try:
+        status_payload = service.get_status()
+    finally:
+        try:
+            service.disconnect()
+        except DeviceOperationError as exc:
+            _raise_device_http_exception(exc)
+
+    return DeviceStatusResponse(
+        message="ZKTeco device status fetched successfully" if status_payload.connected else "ZKTeco device unavailable",
+        data=DeviceStatusData(
+            connected=status_payload.connected,
+            device_model=status_payload.device_model,
+            serial_number=status_payload.serial_number,
+            firmware_version=status_payload.firmware_version,
+            platform=status_payload.platform,
+            face_algorithm_version=status_payload.face_algorithm_version,
+            current_device_time=status_payload.current_device_time,
+            user_count=status_payload.user_count,
+            connection_error=status_payload.connection_error,
+        ),
+    )
+
+
+@router.get("/device/users", response_model=DeviceUsersResponse)
+def get_device_users() -> DeviceUsersResponse:
+    """Return the current user list from the configured ZKTeco device."""
+    service = DeviceService()
+
+    try:
+        users = service.get_users()
+    except (DeviceDependencyError, DeviceConnectionError, DeviceOperationError) as exc:
+        _raise_device_http_exception(exc)
+    finally:
+        try:
+            service.disconnect()
+        except DeviceOperationError as exc:
+            _raise_device_http_exception(exc)
+
+    return DeviceUsersResponse(
+        message="ZKTeco device users fetched successfully",
+        data=[
+            DeviceUserResponse(
+                uid=user.uid,
+                user_id=user.user_id,
+                name=user.name,
+                privilege=user.privilege,
+                card=user.card,
+            )
+            for user in users
+        ],
+    )
+
+
+@router.get("/device/attendance", response_model=DeviceAttendanceResponse)
+def get_device_attendance(
+    limit: int | None = Query(None, ge=1, le=1000, description="Optional maximum records from latest attendance logs"),
+) -> DeviceAttendanceResponse:
+    """Return attendance records from the configured ZKTeco device."""
+    service = DeviceService()
+
+    try:
+        rows = service.get_attendance(limit=limit)
+    except (DeviceDependencyError, DeviceConnectionError, DeviceOperationError, DeviceValidationError) as exc:
+        _raise_device_http_exception(exc)
+    finally:
+        try:
+            service.disconnect()
+        except DeviceOperationError as exc:
+            _raise_device_http_exception(exc)
+
+    return DeviceAttendanceResponse(
+        message="ZKTeco attendance fetched successfully",
+        data=[
+            DeviceAttendanceRecordResponse(
+                uid=row.uid,
+                user_id=row.user_id,
+                timestamp=row.timestamp,
+                status=row.status,
+                punch=row.punch,
+            )
+            for row in rows
+        ],
+    )
+
+
+@router.put("/members/{member_id}/device-mapping", response_model=MemberDeviceMappingResponse)
+def upsert_member_device_mapping(
+    member_id: int,
+    payload: MemberDeviceMappingRequest,
+    db: Session = Depends(get_db),
+) -> MemberDeviceMappingResponse:
+    """Link a member profile to device identifiers, optionally pushing to the physical device."""
+    member_service = MemberService(db)
+
+    try:
+        member = member_service.get_member_or_raise(member_id)
+    except MemberNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    expected_device_user_id = str(member.id)
+    normalized_device_user_id = payload.device_user_id.strip() if payload.device_user_id else expected_device_user_id
+    mapping_uid = payload.device_uid
+    mapping_card = payload.device_card
+
+    if normalized_device_user_id != expected_device_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Device user id must match member id for this implementation",
+        )
+
+    sync_status = "mapped"
+    update_sync_timestamp = False
+
+    if payload.push_to_device:
+        service = DeviceService()
+        try:
+            created_user = service.create_user(
+                uid=mapping_uid,
+                user_id=expected_device_user_id,
+                name=member.full_name,
+                privilege=0,
+                password="",
+                card=0,
+            )
+
+            if mapping_uid is None and created_user.uid:
+                mapping_uid = created_user.uid
+            normalized_device_user_id = expected_device_user_id
+
+            sync_status = "synced"
+            update_sync_timestamp = True
+        except (DeviceDependencyError, DeviceConnectionError, DeviceOperationError, DeviceValidationError) as exc:
+            _raise_device_http_exception(exc)
+        finally:
+            try:
+                service.disconnect()
+            except DeviceOperationError as exc:
+                _raise_device_http_exception(exc)
+
+    try:
+        updated_member = member_service.upsert_device_mapping(
+            member_id=member_id,
+            device_user_id=normalized_device_user_id,
+            device_uid=mapping_uid,
+            device_card=mapping_card,
+            sync_status=sync_status,
+            update_sync_timestamp=update_sync_timestamp,
+        )
+    except MemberNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except InvalidDeviceMappingError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except DuplicateDeviceIdentifierError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    return _to_member_device_mapping_response(updated_member, "Member-device mapping updated successfully")
+
+
+@router.delete("/members/{member_id}/device-mapping", response_model=MemberDeviceMappingResponse)
+def clear_member_device_mapping(
+    member_id: int,
+    payload: MemberDeviceUnlinkRequest,
+    db: Session = Depends(get_db),
+) -> MemberDeviceMappingResponse:
+    """Unlink a member profile from device identifiers, optionally deleting the user from device."""
+    member_service = MemberService(db)
+
+    try:
+        member = member_service.get_member_or_raise(member_id)
+    except MemberNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    if payload.delete_from_device:
+        if member.device_uid is None and not member.device_user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Member has no device identifiers to delete from device",
+            )
+
+        service = DeviceService()
+        try:
+            service.delete_user(uid=member.device_uid, user_id=member.device_user_id)
+        except (DeviceDependencyError, DeviceConnectionError, DeviceOperationError, DeviceValidationError) as exc:
+            _raise_device_http_exception(exc)
+        finally:
+            try:
+                service.disconnect()
+            except DeviceOperationError as exc:
+                _raise_device_http_exception(exc)
+
+    updated_member = member_service.clear_device_mapping(
+        member_id=member_id,
+        sync_status="unlinked",
+    )
+    return _to_member_device_mapping_response(updated_member, "Member-device mapping cleared successfully")
+
+
 @router.get("/members")
 def get_members(
     page: int = Query(1, ge=1, description="Page number"),
@@ -133,23 +406,7 @@ def get_members(
 
     return MemberListResponse(
         message="Members list",
-        data=[
-            MemberResponse(
-                id=member.id,
-                full_name=member.full_name,
-                mobile_number=member.mobile_number,
-                joining_date=member.joined_at,
-                status=member.status,
-                email=member.email,
-                date_of_birth=member.date_of_birth,
-                gender=member.gender,
-                address=member.address,
-                emergency_contact=member.emergency_contact,
-                emergency_phone=member.emergency_phone,
-                notes=member.notes,
-            )
-            for member in members
-        ],
+        data=[_to_member_response(member) for member in members],
         pagination=PaginationMeta(
             page=page,
             page_size=page_size,
@@ -168,20 +425,7 @@ def get_member_by_id(member_id: int, db: Session = Depends(get_db)) -> MemberOpe
 
     return MemberOperationResponse(
         message="Member details",
-        data=MemberResponse(
-            id=member.id,
-            full_name=member.full_name,
-            mobile_number=member.mobile_number,
-            joining_date=member.joined_at,
-            status=member.status,
-            email=member.email,
-            date_of_birth=member.date_of_birth,
-            gender=member.gender,
-            address=member.address,
-            emergency_contact=member.emergency_contact,
-            emergency_phone=member.emergency_phone,
-            notes=member.notes,
-        ),
+        data=_to_member_response(member),
     )
 
 
@@ -199,20 +443,7 @@ def create_member(payload: MemberCreateRequest, db: Session = Depends(get_db)) -
 
     return MemberOperationResponse(
         message="Member created successfully",
-        data=MemberResponse(
-            id=member.id,
-            full_name=member.full_name,
-            mobile_number=member.mobile_number,
-            joining_date=member.joined_at,
-            status=member.status,
-            email=member.email,
-            date_of_birth=member.date_of_birth,
-            gender=member.gender,
-            address=member.address,
-            emergency_contact=member.emergency_contact,
-            emergency_phone=member.emergency_phone,
-            notes=member.notes,
-        ),
+        data=_to_member_response(member),
     )
 
 
@@ -236,20 +467,7 @@ def update_member(
 
     return MemberOperationResponse(
         message="Member updated successfully",
-        data=MemberResponse(
-            id=member.id,
-            full_name=member.full_name,
-            mobile_number=member.mobile_number,
-            joining_date=member.joined_at,
-            status=member.status,
-            email=member.email,
-            date_of_birth=member.date_of_birth,
-            gender=member.gender,
-            address=member.address,
-            emergency_contact=member.emergency_contact,
-            emergency_phone=member.emergency_phone,
-            notes=member.notes,
-        ),
+        data=_to_member_response(member),
     )
 
 

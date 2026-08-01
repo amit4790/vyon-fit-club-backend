@@ -44,11 +44,41 @@ class MemberRepository:
         statement = select(Member).where(Member.id == member_id, Member.deleted_at.is_(None))
         return self.db.execute(statement).scalar_one_or_none()
 
+    def get_member_by_id_any_status(self, member_id: int) -> Member | None:
+        statement = select(Member).where(Member.id == member_id)
+        return self.db.execute(statement).scalar_one_or_none()
+
     def get_member_by_mobile(self, mobile_number: str) -> Member | None:
         statement = select(Member).where(
             Member.mobile_number == mobile_number,
             Member.deleted_at.is_(None),
         )
+        return self.db.execute(statement).scalar_one_or_none()
+
+    def get_member_by_mobile_any_status(self, mobile_number: str) -> Member | None:
+        statement = select(Member).where(Member.mobile_number == mobile_number)
+        return self.db.execute(statement).scalar_one_or_none()
+
+    def get_member_by_device_user_id_any_status(
+        self,
+        device_user_id: str,
+        *,
+        exclude_member_id: int | None = None,
+    ) -> Member | None:
+        statement = select(Member).where(Member.device_user_id == device_user_id)
+        if exclude_member_id is not None:
+            statement = statement.where(Member.id != exclude_member_id)
+        return self.db.execute(statement).scalar_one_or_none()
+
+    def get_member_by_device_uid_any_status(
+        self,
+        device_uid: int,
+        *,
+        exclude_member_id: int | None = None,
+    ) -> Member | None:
+        statement = select(Member).where(Member.device_uid == device_uid)
+        if exclude_member_id is not None:
+            statement = statement.where(Member.id != exclude_member_id)
         return self.db.execute(statement).scalar_one_or_none()
 
     def add(self, member: Member) -> Member:

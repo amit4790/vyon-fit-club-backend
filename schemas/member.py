@@ -98,6 +98,10 @@ class MemberResponse(BaseModel):
     emergency_contact: str | None
     emergency_phone: str | None
     notes: str | None
+    device_user_id: str | None = None
+    device_uid: int | None = None
+    device_card: int | None = None
+    device_sync_status: str | None = None
 
     class Config:
         from_attributes = True

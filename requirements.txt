@@ -10,3 +10,4 @@ psycopg[binary]==3.3.4
 utils==1.0.2
 python-jose==3.3.0
 pillow
+pyzk==0.9

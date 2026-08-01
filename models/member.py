@@ -3,7 +3,7 @@
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Date, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
@@ -32,6 +32,11 @@ class Member(Base):
     emergency_contact: Mapped[str | None] = mapped_column(String(120), nullable=True)
     emergency_phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    device_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True, index=True)
+    device_uid: Mapped[int | None] = mapped_column(Integer, nullable=True, unique=True, index=True)
+    device_card: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    device_sync_status: Mapped[str] = mapped_column(String(20), nullable=False, default="unlinked")
+    last_device_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     joined_at: Mapped[date] = mapped_column(Date, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

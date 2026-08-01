@@ -190,9 +190,6 @@ class InvoiceService:
         final_amount = self._money(payload.final_amount_received)
         amount_paid_today = self._money(payload.amount_paid_today)
 
-        if final_amount > original_price:
-            raise InvalidPaymentAmountError("Final Amount Payable cannot exceed Original Membership Price")
-
         if amount_paid_today > final_amount:
             raise InvalidPaymentAmountError("Amount Paid Today cannot exceed Final Amount Payable")
 

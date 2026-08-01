@@ -9,6 +9,7 @@ from .dashboard import (
     TrainerDashboardResponse,
     MemberDashboardResponse,
 )
+from .device import DeviceConnectionStatusResponse, DeviceUserResponse, DeviceUsersResponse
 from .health import HealthResponse
 from .invoice import (
     InvoiceListResponse,
@@ -40,6 +41,9 @@ __all__ = [
     "AdminDashboardResponse",
     "TrainerDashboardResponse",
     "MemberDashboardResponse",
+    "DeviceConnectionStatusResponse",
+    "DeviceUserResponse",
+    "DeviceUsersResponse",
     "HealthResponse",
     "InvoiceResponse",
     "InvoiceListResponse",

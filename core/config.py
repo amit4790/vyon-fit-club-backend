@@ -25,6 +25,15 @@ class Settings(BaseSettings):
     # Database Settings
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/vyonfitclub"
 
+    # ZKTeco device settings
+    zkteco_device_host: str = "192.168.31.218"
+    zkteco_device_port: int = 4370
+    zkteco_device_id: int = 1
+    zkteco_communication_key: int = 0
+    zkteco_timeout_seconds: int = 10
+    zkteco_omit_ping: bool = True
+    zkteco_encoding: str = "UTF-8"
+
     # Production administrator bootstrap settings
     super_admin_email: str = "admin@vyonfitclub.com"
     super_admin_name: str = "VYON Administrator"
@@ -86,6 +95,15 @@ class Settings(BaseSettings):
 
         if self.access_token_expire_minutes <= 0:
             raise ValueError("ACCESS_TOKEN_EXPIRE_MINUTES must be greater than zero")
+
+        if self.zkteco_device_port <= 0:
+            raise ValueError("ZKTECO_DEVICE_PORT must be greater than zero")
+
+        if self.zkteco_timeout_seconds <= 0:
+            raise ValueError("ZKTECO_TIMEOUT_SECONDS must be greater than zero")
+
+        if self.zkteco_device_id <= 0:
+            raise ValueError("ZKTECO_DEVICE_ID must be greater than zero")
 
         if self.is_production_like_environment and not self.jwt_secret_key.strip():
             raise ValueError("JWT_SECRET_KEY is required in production-like environments")
