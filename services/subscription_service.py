@@ -36,6 +36,10 @@ class SubscriptionConflictError(Exception):
     """Raised when assigning a subscription overlaps with active dates."""
 
 
+class SubscriptionNotFoundError(Exception):
+    """Raised when a subscription does not exist."""
+
+
 @dataclass
 class ExpiringResult:
     items: list[SubscriptionResponse]
@@ -204,10 +208,7 @@ class SubscriptionService:
         if not plan:
             raise PlanNotFoundError("Membership plan not found")
 
-        overlap = self.repo.get_overlapping_active_subscription(member_id=member_id, start_date=start_date)
-        if overlap:
-            raise SubscriptionConflictError("Member already has an active subscription in this period")
-
+        # Multiple concurrent active memberships are allowed.
         base_price = self._to_money(plan.base_price)
         tax_percent = self._to_money(plan.tax_percent)
         tax_amount = self._to_money(base_price * tax_percent / Decimal("100"))
@@ -274,6 +275,90 @@ class SubscriptionService:
             row,
             duration_label_override=self._format_duration_label(effective_duration_value, effective_duration_unit),
         ), notifications
+
+    def change_subscription_plan(
+        self,
+        subscription_id: int,
+        plan_id: int,
+        start_date: date | None = None,
+        duration_value: int | None = None,
+        duration_unit: str | None = None,
+    ) -> SubscriptionResponse:
+        """Update an existing subscription to a different membership plan."""
+        row = self.repo.get_subscription_by_id(subscription_id)
+        if not row:
+            raise SubscriptionNotFoundError("Subscription not found")
+
+        if row.status not in {"active", "expired"}:
+            raise SubscriptionConflictError("Only active or expired subscriptions can change plan")
+
+        plan = self.repo.get_active_plan_by_id(plan_id)
+        if not plan:
+            raise PlanNotFoundError("Membership plan not found")
+
+        effective_start = start_date or row.start_date
+        if effective_start > date.today():
+            raise SubscriptionConflictError("Start Date cannot be in the future")
+
+        effective_duration_value = duration_value if duration_value is not None else plan.duration_months
+        effective_duration_unit = duration_unit if duration_unit is not None else "months"
+        end_date = self._calculate_end_date(
+            start_date=effective_start,
+            duration_value=effective_duration_value,
+            duration_unit=effective_duration_unit,
+        )
+
+        base_price = self._to_money(plan.base_price)
+        tax_percent = self._to_money(plan.tax_percent)
+        tax_amount = self._to_money(base_price * tax_percent / Decimal("100"))
+        total_amount = self._to_money(base_price + tax_amount)
+
+        row.plan_id = plan.id
+        row.start_date = effective_start
+        row.end_date = end_date
+        row.base_price = float(base_price)
+        row.tax_percent = float(tax_percent)
+        row.tax_amount = float(tax_amount)
+        row.total_amount = float(total_amount)
+        row.status = "active"
+
+        invoice = self.invoice_repo.get_latest_invoice_by_subscription_id(subscription_id)
+        if invoice:
+            total_paid = self._to_money(invoice.total_paid if invoice.total_paid is not None else 0)
+            outstanding = self._to_money(max(total_amount - total_paid, Decimal("0.00")))
+            invoice.amount = float(total_amount)
+            invoice.original_price = float(total_amount)
+            invoice.final_amount_received = float(total_amount)
+            invoice.gst_amount = float(tax_amount)
+            invoice.outstanding_balance = float(outstanding)
+            if outstanding <= 0:
+                invoice.status = "paid"
+                row.payment_status = "paid"
+            elif total_paid > 0:
+                invoice.status = "partial"
+                row.payment_status = "partial"
+            else:
+                invoice.status = "pending"
+                row.payment_status = "pending"
+                invoice.paid_at = None
+        else:
+            row.payment_status = "pending"
+
+        try:
+            self.db.commit()
+            row = self.repo.get_subscription_by_id(subscription_id)
+            if not row:
+                raise SubscriptionNotFoundError("Subscription not found")
+        except SubscriptionNotFoundError:
+            raise
+        except Exception:
+            self.db.rollback()
+            raise
+
+        return self._to_subscription_response(
+            row,
+            duration_label_override=self._format_duration_label(effective_duration_value, effective_duration_unit),
+        )
 
     def get_member_subscriptions(self, member_id: int) -> list[SubscriptionResponse]:
         member = self.repo.get_member_by_id(member_id)

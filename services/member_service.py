@@ -300,11 +300,29 @@ class MemberService:
             raise MemberNotFoundError("Member not found")
 
         logger.info("Soft deleting member", extra={"member_id": member_id, "mobile_number": member.mobile_number})
+
+        # Hard-delete memberships and invoices so soft-delete restore cannot reattach ghost plans.
+        from repositories.invoice_repository import InvoiceRepository
+        from repositories.subscription_repository import SubscriptionRepository
+
+        invoice_repo = InvoiceRepository(self.db)
+        subscription_repo = SubscriptionRepository(self.db)
+        deleted_invoices = invoice_repo.delete_invoices_for_member(member_id)
+        deleted_subscriptions = subscription_repo.delete_subscriptions_for_member(member_id)
+
         member.status = "inactive"
         member.deleted_at = datetime.now(timezone.utc)
 
         try:
             self.db.commit()
+            logger.info(
+                "Member soft-deleted with membership cascade",
+                extra={
+                    "member_id": member_id,
+                    "deleted_invoices": deleted_invoices,
+                    "deleted_subscriptions": deleted_subscriptions,
+                },
+            )
         except Exception:
             self.db.rollback()
             logger.exception("Unexpected error during member delete", extra={"member_id": member_id})

@@ -57,6 +57,16 @@ class SubscriptionRepository:
         self.db.refresh(subscription)
         return subscription
 
+    def delete_subscriptions_for_member(self, member_id: int) -> int:
+        """Permanently delete all subscriptions for a member. Returns deleted count."""
+        statement = select(MembershipSubscription).where(MembershipSubscription.member_id == member_id)
+        rows = self.db.execute(statement).scalars().all()
+        count = len(rows)
+        for row in rows:
+            self.db.delete(row)
+        self.db.flush()
+        return count
+
     def get_subscription_by_id(self, subscription_id: int) -> MembershipSubscription | None:
         statement = (
             select(MembershipSubscription)

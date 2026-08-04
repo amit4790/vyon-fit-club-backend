@@ -46,6 +46,16 @@ class InvoiceRepository:
         )
         return self.db.execute(statement).scalar_one_or_none()
 
+    def delete_invoices_for_member(self, member_id: int) -> int:
+        """Permanently delete all invoices for a member. Returns deleted count."""
+        statement = select(Invoice).where(Invoice.member_id == member_id)
+        rows = self.db.execute(statement).scalars().all()
+        count = len(rows)
+        for row in rows:
+            self.db.delete(row)
+        self.db.flush()
+        return count
+
     def list_invoices(
         self,
         *,

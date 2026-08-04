@@ -44,6 +44,7 @@ from schemas.invoice import (
 from schemas.report import ReportsSummaryResponse
 from schemas.subscription import (
     AssignSubscriptionRequest,
+    ChangeSubscriptionPlanRequest,
     ExpiringSubscriptionsResponse,
     MemberSubscriptionsResponse,
     PlanCatalogResponse,
@@ -92,6 +93,7 @@ from services.subscription_service import (
     MemberNotFoundError as SubscriptionMemberNotFoundError,
     PlanNotFoundError,
     SubscriptionConflictError,
+    SubscriptionNotFoundError as SubscriptionLookupError,
     SubscriptionService,
 )
 from services.trainer_service import (
@@ -474,7 +476,7 @@ def update_member(
 @router.delete("/members/{member_id}", response_model=MemberDeleteResponse)
 def delete_member(member_id: int, db: Session = Depends(get_db)) -> MemberDeleteResponse:
     """
-    Soft-delete a member by marking the record inactive.
+    Soft-delete a member and permanently remove associated memberships/invoices.
     """
     service = MemberService(db)
 
@@ -548,6 +550,40 @@ def assign_member_subscription(
         message="Subscription assigned successfully",
         data=subscription,
         notifications=notifications,
+    )
+
+
+@router.patch(
+    "/subscriptions/{subscription_id}/plan",
+    response_model=SubscriptionOperationResponse,
+)
+def change_subscription_plan(
+    subscription_id: int,
+    payload: ChangeSubscriptionPlanRequest,
+    db: Session = Depends(get_db),
+) -> SubscriptionOperationResponse:
+    """Change the membership plan on an existing subscription."""
+    service = SubscriptionService(db)
+
+    try:
+        subscription = service.change_subscription_plan(
+            subscription_id=subscription_id,
+            plan_id=payload.plan_id,
+            start_date=payload.start_date,
+            duration_value=payload.duration_value,
+            duration_unit=payload.duration_unit,
+        )
+    except SubscriptionLookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except PlanNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except SubscriptionConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    return SubscriptionOperationResponse(
+        message="Subscription plan updated successfully",
+        data=subscription,
+        notifications=[],
     )
 
 
