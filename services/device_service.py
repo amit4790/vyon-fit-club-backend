@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import traceback
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -86,6 +87,24 @@ class DeviceService:
             "device_id": self.settings.zkteco_device_id,
         }
 
+    def _connection_options(self, *, force_udp: bool) -> dict[str, Any]:
+        try:
+            communication_key = int(self.settings.zkteco_communication_key)
+        except (TypeError, ValueError) as exc:
+            raise DeviceValidationError(
+                "Invalid ZKTECO_COMMUNICATION_KEY. It must be an integer (000000 maps to 0)."
+            ) from exc
+
+        return {
+            "host": self.settings.zkteco_device_host,
+            "port": int(self.settings.zkteco_device_port),
+            "timeout": int(self.settings.zkteco_timeout_seconds),
+            "password": communication_key,
+            "force_udp": bool(force_udp),
+            "ommit_ping": bool(self.settings.zkteco_omit_ping),
+            "encoding": self.settings.zkteco_encoding,
+        }
+
     @staticmethod
     def _normalize_value(value: Any) -> Any:
         if value is None:
@@ -131,7 +150,7 @@ class DeviceService:
             raise DeviceValidationError("Either uid or user_id must be provided")
         return uid, normalized_user_id
 
-    def _build_client(self) -> Any:
+    def _build_client(self, *, force_udp: bool) -> Any:
         try:
             from zk import ZK
         except ModuleNotFoundError as exc:
@@ -139,14 +158,29 @@ class DeviceService:
                 "pyzk is not installed. Add the backend dependency set before using ZKTeco integration."
             ) from exc
 
+        options = self._connection_options(force_udp=force_udp)
+        logger.info(
+            "Creating ZKTeco SDK client",
+            extra={
+                **self._log_context(),
+                "zk_host": options["host"],
+                "zk_port": options["port"],
+                "zk_timeout": options["timeout"],
+                "zk_password": options["password"],
+                "zk_force_udp": options["force_udp"],
+                "zk_ommit_ping": options["ommit_ping"],
+                "zk_encoding": options["encoding"],
+            },
+        )
+
         return ZK(
-            self.settings.zkteco_device_host,
-            port=self.settings.zkteco_device_port,
-            timeout=self.settings.zkteco_timeout_seconds,
-            password=self.settings.zkteco_communication_key,
-            force_udp=False,
-            ommit_ping=self.settings.zkteco_omit_ping,
-            encoding=self.settings.zkteco_encoding,
+            options["host"],
+            port=options["port"],
+            timeout=options["timeout"],
+            password=options["password"],
+            force_udp=options["force_udp"],
+            ommit_ping=options["ommit_ping"],
+            encoding=options["encoding"],
         )
 
     def connect(self) -> Any:
@@ -158,28 +192,111 @@ class DeviceService:
             extra=self._log_context(),
         )
 
-        self._zk_client = self._build_client()
+        configured_force_udp = bool(self.settings.zkteco_force_udp)
+        attempt_modes: list[tuple[bool, bool]] = [(configured_force_udp, False)]
+        if not configured_force_udp:
+            # Some devices expose port 4370 but only complete pyzk handshakes over UDP.
+            attempt_modes.append((True, False))
 
-        try:
-            self._connection = self._zk_client.connect()
-            logger.info(
-                "Connected to ZKTeco device",
-                extra=self._log_context(),
-            )
-            return self._connection
-        except Exception as exc:
-            logger.exception(
-                "Failed to connect to ZKTeco device",
-                extra=self._log_context(),
-            )
+        if bool(self.settings.zkteco_map_6001_to_unauth):
+            # Some newer models return 6001 where pyzk expects CMD_ACK_UNAUTH (2005).
+            attempt_modes.append((False, True))
+
+        attempt_errors: list[str] = []
+        last_exception: Exception | None = None
+        last_traceback = ""
+        observed_error_texts: list[str] = []
+
+        for index, (force_udp, map_6001_to_unauth) in enumerate(attempt_modes, start=1):
             self._connection = None
             self._zk_client = None
-            raise DeviceConnectionError(
-                f"Unable to connect to ZKTeco device at {self.settings.zkteco_device_host}:{self.settings.zkteco_device_port}"
-            ) from exc
+
+            try:
+                self._zk_client = self._build_client(force_udp=force_udp)
+                logger.info(
+                    "Attempting ZKTeco SDK connect",
+                    extra={
+                        **self._log_context(),
+                        "attempt": index,
+                        "force_udp": force_udp,
+                        "map_6001_to_unauth": map_6001_to_unauth,
+                    },
+                )
+
+                original_ack_unauth: int | None = None
+                if map_6001_to_unauth:
+                    from zk import const
+
+                    original_ack_unauth = const.CMD_ACK_UNAUTH
+                    const.CMD_ACK_UNAUTH = 6001
+
+                try:
+                    self._connection = self._zk_client.connect()
+                finally:
+                    if map_6001_to_unauth and original_ack_unauth is not None:
+                        from zk import const
+
+                        const.CMD_ACK_UNAUTH = original_ack_unauth
+
+                logger.info(
+                    "Connected to ZKTeco device",
+                    extra={
+                        **self._log_context(),
+                        "attempt": index,
+                        "force_udp": force_udp,
+                        "map_6001_to_unauth": map_6001_to_unauth,
+                    },
+                )
+                return self._connection
+            except Exception as exc:
+                last_exception = exc
+                last_traceback = traceback.format_exc()
+                observed_error_texts.append(str(exc))
+                attempt_errors.append(
+                    f"attempt={index} force_udp={force_udp} map_6001_to_unauth={map_6001_to_unauth} "
+                    f"error={exc.__class__.__name__}: {exc}"
+                )
+                logger.exception(
+                    "Failed ZKTeco SDK connect attempt",
+                    extra={
+                        **self._log_context(),
+                        "attempt": index,
+                        "force_udp": force_udp,
+                        "map_6001_to_unauth": map_6001_to_unauth,
+                    },
+                )
+
+        self._connection = None
+        self._zk_client = None
+        attempt_summary = " | ".join(attempt_errors) if attempt_errors else "no attempts recorded"
+        message = (
+            f"Unable to connect to ZKTeco device at {self.settings.zkteco_device_host}:{self.settings.zkteco_device_port}. "
+            f"SDK attempts: {attempt_summary}."
+        )
+
+        lowered_errors = " | ".join(observed_error_texts).lower()
+        if "2032" in lowered_errors:
+            message += (
+                " Device replied with auth rejection code 2032 after handshake. "
+                "This usually indicates communication-key mismatch or device-side SDK auth policy mismatch."
+            )
+        elif "6001" in lowered_errors:
+            message += (
+                " Device replied with non-standard handshake code 6001. "
+                "This model may require alternate auth semantics or firmware-specific SDK handling."
+            )
+
+        if last_exception is not None:
+            message = (
+                f"{message} Last SDK exception: {last_exception.__class__.__name__}: {last_exception}. "
+                f"Traceback:\n{last_traceback}"
+            )
+            raise DeviceConnectionError(message) from last_exception
+        raise DeviceConnectionError(message)
 
     def disconnect(self) -> None:
         if self._connection is None:
+            logger.info("Skipping ZKTeco disconnect because no active connection", extra=self._log_context())
             return
 
         logger.info(
@@ -198,6 +315,7 @@ class DeviceService:
                 )
 
             self._connection.disconnect()
+            logger.info("Disconnected from ZKTeco device", extra=self._log_context())
         except Exception as exc:
             logger.exception(
                 "Failed to disconnect from ZKTeco device cleanly",
@@ -272,9 +390,11 @@ class DeviceService:
         )
 
         try:
+            logger.info("Disabling ZKTeco device for user read", extra=self._log_context())
             connection.disable_device()
             device_disabled = True
 
+            logger.info("Calling ZKTeco SDK get_users", extra=self._log_context())
             users = connection.get_users()
             mapped_users = [self._map_user(user) for user in users]
 
@@ -294,6 +414,7 @@ class DeviceService:
         finally:
             if device_disabled:
                 try:
+                    logger.info("Re-enabling ZKTeco device after user read", extra=self._log_context())
                     connection.enable_device()
                 except Exception:
                     logger.warning(

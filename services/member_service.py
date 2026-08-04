@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 from models import Member
 from repositories import MemberRepository
 from schemas.member import MemberCreateRequest, MemberUpdateRequest
+from services.push_device_service import PushDeviceService
+from core.config import settings
 
 
 logger = logging.getLogger(__name__)
@@ -104,6 +106,29 @@ class MemberService:
 
             self.db.commit()
             self.db.refresh(member)
+            
+            # Auto-sync to PUSH devices if enabled
+            if settings.device_push_enabled:
+                try:
+                    push_service = PushDeviceService(self.db)
+                    card_number = str(member.device_card) if member.device_card else None
+                    commands = push_service.sync_member_to_devices(
+                        member_id=member.id,
+                        member_name=member.full_name,
+                        card_number=card_number
+                    )
+                    logger.info(
+                        f"Queued {len(commands)} user sync commands for new member",
+                        extra={"member_id": member.id, "command_count": len(commands)}
+                    )
+                except Exception as sync_error:
+                    # Log but don't fail member creation if sync fails
+                    logger.error(
+                        "Failed to queue device sync commands for new member",
+                        extra={"member_id": member.id},
+                        exc_info=sync_error
+                    )
+            
             return member
         except IntegrityError as exc:
             self.db.rollback()

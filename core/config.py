@@ -25,14 +25,20 @@ class Settings(BaseSettings):
     # Database Settings
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/vyonfitclub"
 
-    # ZKTeco device settings
+    # ZKTeco device settings (legacy pyzk/Standalone SDK)
     zkteco_device_host: str = "192.168.31.218"
     zkteco_device_port: int = 4370
     zkteco_device_id: int = 1
     zkteco_communication_key: int = 0
     zkteco_timeout_seconds: int = 10
+    zkteco_force_udp: bool = False
+    zkteco_map_6001_to_unauth: bool = True
     zkteco_omit_ping: bool = True
     zkteco_encoding: str = "UTF-8"
+
+    # ZKTeco PUSH Protocol settings (official iClock/ADMS HTTP protocol)
+    device_push_enabled: bool = True
+    device_push_log_raw: bool = True  # Log complete raw payloads for debugging
 
     # Production administrator bootstrap settings
     super_admin_email: str = "admin@vyonfitclub.com"

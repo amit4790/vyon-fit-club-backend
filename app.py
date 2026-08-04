@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from starlette import status
 
 from config import settings
-from routes import admin_router, auth_router, dashboard_router, health_router
+from routes import admin_router, auth_router, dashboard_router, health_router, device_router
 
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(dashboard_router)
     app.include_router(admin_router)
+    app.include_router(device_router)
     return app
 
 
