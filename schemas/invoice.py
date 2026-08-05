@@ -69,6 +69,7 @@ PaymentMode = Literal["cash", "upi", "card", "bank_transfer"]
 class CapturePaymentRequest(BaseModel):
     final_amount_received: float = Field(..., gt=0)
     amount_paid_today: float = Field(..., gt=0)
+    original_price: float | None = Field(default=None, ge=0)
     payment_mode: PaymentMode
     transaction_reference: str | None = Field(default=None, max_length=120)
     payment_date: date = Field(default_factory=date.today)

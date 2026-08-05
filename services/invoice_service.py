@@ -186,14 +186,27 @@ class InvoiceService:
         if not invoice:
             raise InvoiceNotFoundError("No invoice found for this subscription")
 
-        original_price = self._money(subscription.base_price)
+        # Prefer staff-edited original price; fall back for older clients/records.
+        if payload.original_price is not None:
+            original_price = self._money(payload.original_price)
+        elif invoice.original_price is not None:
+            original_price = self._money(invoice.original_price)
+        elif subscription.total_amount is not None:
+            original_price = self._money(subscription.total_amount)
+        else:
+            original_price = self._money(subscription.base_price)
+
+        if original_price < Decimal("0.00"):
+            raise InvalidPaymentAmountError("Original Membership Price cannot be less than zero")
+
         final_amount = self._money(payload.final_amount_received)
         amount_paid_today = self._money(payload.amount_paid_today)
 
         if amount_paid_today > final_amount:
             raise InvalidPaymentAmountError("Amount Paid Today cannot exceed Final Amount Payable")
 
-        discount_amount = self._money(original_price - final_amount)
+        # Discount can never be negative when final amount exceeds original price.
+        discount_amount = self._money(max(original_price - final_amount, Decimal("0.00")))
         discount_percentage = self._money(
             (discount_amount / original_price) * Decimal("100") if original_price > 0 else Decimal("0")
         )

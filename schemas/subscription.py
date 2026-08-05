@@ -59,6 +59,22 @@ class AssignSubscriptionRequest(BaseModel):
         return self
 
 
+class ChangeSubscriptionPlanRequest(BaseModel):
+    plan_id: int = Field(..., ge=1)
+    start_date: date | None = None
+    duration_value: int | None = Field(default=None, gt=0)
+    duration_unit: Literal["months", "days"] | None = None
+
+    @model_validator(mode="after")
+    def validate_duration_fields(self) -> "ChangeSubscriptionPlanRequest":
+        if self.start_date is not None and self.start_date > date.today():
+            raise ValueError("Start Date cannot be in the future")
+
+        if (self.duration_value is None) != (self.duration_unit is None):
+            raise ValueError("Duration value and unit must be provided together")
+        return self
+
+
 class SubscriptionResponse(BaseModel):
     id: int
     member_id: int
