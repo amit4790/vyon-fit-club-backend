@@ -245,23 +245,31 @@ class PushDeviceService:
         content_type: Optional[str] = None,
         content_length: Optional[int] = None
     ) -> DeviceAttendanceLog:
+        """Log raw ATTLOG upload. Prefer log_device_table_upload for multi-table support."""
+        return self.log_device_table_upload(
+            device_serial=device_serial,
+            raw_payload=raw_payload,
+            table_name="ATTLOG",
+            content_type=content_type,
+            content_length=content_length,
+        )
+
+    def log_device_table_upload(
+        self,
+        device_serial: str,
+        raw_payload: str,
+        table_name: Optional[str] = None,
+        content_type: Optional[str] = None,
+        content_length: Optional[int] = None
+    ) -> DeviceAttendanceLog:
         """
-        Log raw attendance data upload from device.
+        Log raw device table upload (ATTLOG, USERINFO, BIODATA, OPERLOG, ...).
 
         Called when device posts to POST /iclock/cdata.
-        Stores complete raw payload for future parsing.
-
-        Args:
-            device_serial: Device serial number
-            raw_payload: Complete raw attendance data
-            content_type: HTTP Content-Type header
-            content_length: HTTP Content-Length header
-
-        Returns:
-            Created DeviceAttendanceLog instance
+        Stores complete raw payload for analysis and future parsing.
         """
-        # Count records in payload (lines starting with ATTLOG)
-        record_count = raw_payload.count('\nATTLOG:') + (1 if raw_payload.startswith('ATTLOG:') else 0)
+        normalized_table = (table_name or "").strip().upper()
+        record_count = self._count_table_records(raw_payload, normalized_table)
 
         attendance_log = DeviceAttendanceLog(
             device_serial=device_serial,
@@ -274,27 +282,40 @@ class PushDeviceService:
         self.db.commit()
         self.db.refresh(attendance_log)
 
+        log_message = (
+            f"Device table uploaded: table={normalized_table or 'UNKNOWN'} "
+            f"records={record_count} from device {device_serial}"
+        )
+        log_extra = {
+            "device_serial": device_serial,
+            "table": normalized_table or None,
+            "record_count": record_count,
+            "payload_size": len(raw_payload),
+        }
         if settings.device_push_log_raw:
-            logger.info(
-                f"Attendance uploaded: {record_count} records from device {device_serial}",
-                extra={
-                    "device_serial": device_serial,
-                    "record_count": record_count,
-                    "payload_size": len(raw_payload),
-                    "raw_payload": raw_payload  # Log full payload when enabled
-                }
-            )
-        else:
-            logger.info(
-                f"Attendance uploaded: {record_count} records from device {device_serial}",
-                extra={
-                    "device_serial": device_serial,
-                    "record_count": record_count,
-                    "payload_size": len(raw_payload)
-                }
-            )
+            log_extra["raw_payload"] = raw_payload
 
+        logger.info(log_message, extra=log_extra)
         return attendance_log
+
+    @staticmethod
+    def _count_table_records(raw_payload: str, table_name: str) -> int:
+        """Best-effort record count for known ADMS table payloads."""
+        if not raw_payload.strip():
+            return 0
+
+        if table_name == "ATTLOG":
+            return raw_payload.count("\nATTLOG:") + (1 if raw_payload.startswith("ATTLOG:") else 0)
+
+        if table_name == "USERINFO":
+            # USERINFO rows are typically newline-separated; count non-empty lines.
+            return sum(1 for line in raw_payload.splitlines() if line.strip())
+
+        if table_name in {"BIODATA", "OPERLOG"}:
+            prefix = f"{table_name}:"
+            return raw_payload.count(f"\n{prefix}") + (1 if raw_payload.startswith(prefix) else 0)
+
+        return sum(1 for line in raw_payload.splitlines() if line.strip())
 
     def get_device(self, serial_number: str) -> Optional[PushDevice]:
         """Get device by serial number."""
@@ -335,49 +356,33 @@ class PushDeviceService:
         card_number: Optional[str] = None
     ) -> List[DeviceCommand]:
         """
-        Queue user synchronization commands for all active PUSH devices.
+        Queue user add/update commands for all active PUSH devices.
         
         Called when a member is created or updated in VYON.
-        Creates a DeviceCommand for each active device to add/update the user.
-        
-        Args:
-            member_id: VYON member ID (used as device PIN)
-            member_name: Member's full name (displayed on device)
-            card_number: Optional card number for card-based access
-            
-        Returns:
-            List of queued DeviceCommand instances
+        Device PIN is the VYON member.id.
         """
-        # Get all active devices
         devices = self.db.query(PushDevice).filter(
             PushDevice.is_active == True
         ).all()
         
         if not devices:
             logger.warning(
-                f"No active PUSH devices found for member sync",
+                "No active PUSH devices found for member sync",
                 extra={"member_id": member_id}
             )
             return []
         
-        # Queue command for each device
         commands = []
-        for device in devices:
-            # Generate unique INTEGER command ID (required by PUSH protocol)
-            # Use timestamp + member_id to ensure uniqueness
-            command_id = int(datetime.utcnow().timestamp() * 1000) % 2147483647  # Keep within 32-bit int
-            
-            # Build iClock command
+        for index, device in enumerate(devices):
+            command_id = self._next_command_id(member_id=member_id, salt=index)
             command_str = UserSyncCommand.build_update_user_command(
                 command_id=command_id,
                 pin=str(member_id),
                 username=member_name,
                 privilege=0,
                 password="",
-                card=card_number or ""
+                card=card_number or "",
             )
-            
-            # Queue command (store as string for database)
             device_command = self.queue_command(
                 device_serial=device.serial_number,
                 command_id=str(command_id),
@@ -385,48 +390,230 @@ class PushDeviceService:
                 max_retries=3
             )
             commands.append(device_command)
-            
             logger.info(
                 f"Queued user sync command for member {member_id} to device {device.serial_number}",
                 extra={
                     "member_id": member_id,
                     "device_serial": device.serial_number,
-                    "command_id": command_id
-                }
+                    "command_id": command_id,
+                },
             )
         
         return commands
+
+    def remove_member_from_devices(self, member_id: int) -> List[DeviceCommand]:
+        """
+        Queue user delete commands for all active PUSH devices.
+        
+        Called when a member is deleted in VYON.
+        Device PIN is the VYON member.id.
+        """
+        devices = self.db.query(PushDevice).filter(
+            PushDevice.is_active == True
+        ).all()
+
+        if not devices:
+            logger.warning(
+                "No active PUSH devices found for member delete sync",
+                extra={"member_id": member_id},
+            )
+            return []
+
+        commands = []
+        for index, device in enumerate(devices):
+            command_id = self._next_command_id(member_id=member_id, salt=index + 500)
+            command_str = UserSyncCommand.build_delete_user_command(
+                command_id=command_id,
+                pin=str(member_id),
+            )
+            device_command = self.queue_command(
+                device_serial=device.serial_number,
+                command_id=str(command_id),
+                command=command_str,
+                max_retries=3,
+            )
+            commands.append(device_command)
+            logger.info(
+                f"Queued user delete command for member {member_id} to device {device.serial_number}",
+                extra={
+                    "member_id": member_id,
+                    "device_serial": device.serial_number,
+                    "command_id": command_id,
+                },
+            )
+
+        return commands
+
+    def resync_all_members_to_device(self, device_sn: str) -> dict[str, Any]:
+        """
+        Bulk re-sync all active members to a specific PUSH device.
+
+        Queues DATA UPDATE USERINFO for each member (and BIOPHOTO when available),
+        sequentially with status=PENDING.
+        """
+        from models import Member
+
+        device = self.get_device(device_sn)
+        if not device or not device.is_active:
+            raise DeviceNotRegisteredError(f"Device not found or inactive: {device_sn}")
+
+        members = (
+            self.db.query(Member)
+            .filter(
+                Member.deleted_at.is_(None),
+                Member.status == "active",
+            )
+            .order_by(Member.id.asc())
+            .all()
+        )
+
+        queued: List[DeviceCommand] = []
+        for index, member in enumerate(members):
+            queued.extend(
+                self._queue_member_sync_commands(
+                    member=member,
+                    device_serial=device.serial_number,
+                    salt_base=index * 10,
+                )
+            )
+
+        logger.info(
+            "Bulk device re-sync queued",
+            extra={
+                "device_serial": device_sn,
+                "member_count": len(members),
+                "queued_commands": len(queued),
+            },
+        )
+        return {
+            "status": "success",
+            "device_sn": device_sn,
+            "members_synced": len(members),
+            "queued_commands": len(queued),
+        }
+
+    def sync_single_member_to_device(self, user_id: int, device_sn: str) -> dict[str, Any]:
+        """
+        Queue USERINFO (and BIOPHOTO if present) for one member to one device.
+        `user_id` is the VYON member.id used as device PIN.
+        """
+        from models import Member
+
+        device = self.get_device(device_sn)
+        if not device or not device.is_active:
+            raise DeviceNotRegisteredError(f"Device not found or inactive: {device_sn}")
+
+        member = (
+            self.db.query(Member)
+            .filter(
+                Member.id == user_id,
+                Member.deleted_at.is_(None),
+            )
+            .first()
+        )
+        if not member:
+            raise MemberSyncNotFoundError(f"Member not found: {user_id}")
+
+        queued = self._queue_member_sync_commands(
+            member=member,
+            device_serial=device.serial_number,
+            salt_base=user_id,
+        )
+
+        logger.info(
+            "Single member device sync queued",
+            extra={
+                "device_serial": device_sn,
+                "member_id": user_id,
+                "queued_commands": len(queued),
+            },
+        )
+        return {
+            "status": "success",
+            "device_sn": device_sn,
+            "user_id": user_id,
+            "queued_commands": len(queued),
+        }
+
+    def _queue_member_sync_commands(
+        self,
+        *,
+        member: Any,
+        device_serial: str,
+        salt_base: int,
+    ) -> List[DeviceCommand]:
+        """Queue USERINFO then optional BIOPHOTO for one member, in order."""
+        commands: List[DeviceCommand] = []
+        passwd = str(getattr(member, "pin", None) or "")
+        member_name = getattr(member, "full_name", None) or getattr(member, "name", "") or ""
+
+        userinfo_cmd_id = self._next_command_id(member_id=member.id, salt=salt_base)
+        userinfo_command = UserSyncCommand.build_update_userinfo_command(
+            command_id=userinfo_cmd_id,
+            pin=str(member.id),
+            name=member_name,
+            privilege=0,
+            password=passwd,
+        )
+        commands.append(
+            self.queue_command(
+                device_serial=device_serial,
+                command_id=str(userinfo_cmd_id),
+                command=userinfo_command,
+                max_retries=3,
+            )
+        )
+
+        biophoto_content = (
+            getattr(member, "biophoto_content", None)
+            or getattr(member, "biophoto_template", None)
+            or getattr(member, "face_template", None)
+        )
+        biophoto_type = getattr(member, "biophoto_type", None)
+        if biophoto_content:
+            biophoto_cmd_id = self._next_command_id(member_id=member.id, salt=salt_base + 1)
+            biophoto_command = UserSyncCommand.build_update_biophoto_command(
+                command_id=biophoto_cmd_id,
+                pin=str(member.id),
+                content=str(biophoto_content),
+                photo_type=int(biophoto_type) if biophoto_type is not None else 9,
+            )
+            commands.append(
+                self.queue_command(
+                    device_serial=device_serial,
+                    command_id=str(biophoto_cmd_id),
+                    command=biophoto_command,
+                    max_retries=3,
+                )
+            )
+
+        return commands
+
+    @staticmethod
+    def _next_command_id(*, member_id: int, salt: int = 0) -> int:
+        """Generate a unique integer command ID within 32-bit signed range."""
+        base = int(datetime.utcnow().timestamp() * 1000) % 2000000000
+        return (base + (member_id * 17) + salt) % 2147483647 or 1
+
+
+class DeviceNotRegisteredError(Exception):
+    """Raised when a PUSH device serial is missing or inactive."""
+
+
+class MemberSyncNotFoundError(Exception):
+    """Raised when a member cannot be synced because it does not exist."""
 
 
 # User synchronization
 class UserSyncCommand:
     """
-    User synchronization command builders for ZKTeco PUSH protocol.
+    User synchronization command builders for ZKTeco PUSH / ADMS protocol.
     
-    Supports:
-    - DATA user: Add or update user on device (no UPDATE keyword)
-    - DATA DELETE user: Remove user from device
-    
-    ACTUAL Command format for MiniAC Plus / ZAM230 (verified by device testing):
-    C:<integer_id>:DATA user pin=123\tname=John Doe\tpri=0\tpasswd=\tcard=\tgrp=1
-    
-    CRITICAL FINDINGS:
-    - Command ID must be an integer
-    - No "UPDATE" keyword after DATA (device expects: "DATA user" not "DATA UPDATE user")
-    - Table name is lowercase "user" (not "USERINFO")
-    - Field names are lowercase: pin, name, pri, passwd, card, grp
-    - Fields are tab-separated
-    - grp (group) field may be required (default: 1)
-    
-    Tab-separated fields:
-    - pin: User ID on device (required)
-    - name: Display name (required)
-    - pri: Privilege level (0=normal user, 14=admin)
-    - passwd: User password (optional, usually blank)
-    - card: Card number (optional)
-    - grp: Group number (default: 1)
-    
-    Reference: Verified with actual MiniAC Plus device behavior
+    Formats:
+    C:<id>:DATA USER PIN=31\tName=Jasleen Kaur\tPri=0\tGroup=1
+    C:<id>:DATA UPDATE USERINFO PIN=31\tName=Jasleen Kaur\tPri=0\tPasswd=
+    C:<id>:DATA DELETE USERINFO PIN=31
+    C:<id>:DATA UPDATE BIOPHOTO PIN=31\tType=9\tSize=...\tContent=...
     """
 
     @staticmethod
@@ -440,50 +627,58 @@ class UserSyncCommand:
         group: int = 1
     ) -> str:
         """
-        Build DATA user command for adding/updating user on device.
+        Build DATA USER command for adding/updating user on device.
         
-        Args:
-            command_id: Unique command identifier (must be integer)
-            pin: User PIN (numeric ID on device)
-            username: User display name
-            privilege: User privilege level (0=user, 14=admin)
-            password: User password (optional, blank for normal users)
-            card: Card number (optional)
-            group: User group number (default: 1)
-
-        Returns:
-            Command string in actual iClock protocol format
-            
-        Example:
-            build_update_user_command(295, "456", "John Doe", 0, "", "12345")
-            Returns: "C:295:DATA user pin=456\tname=John Doe\tpri=0\tpasswd=\tcard=12345\tgrp=1"
+        PIN on device = VYON member.id
         """
-        # Build tab-separated field list (lowercase field names as expected by MiniAC Plus)
         fields = [
-            f"pin={pin}",
-            f"name={username}",
-            f"pri={privilege}",
-            f"passwd={password}",
-            f"card={card}",
-            f"grp={group}"
+            f"PIN={pin}",
+            f"Name={username}",
+            f"Pri={privilege}",
+            f"Group={group}",
         ]
-        
-        # Join with tabs and construct full command
-        # Format: C:<id>:DATA user <tab-separated-fields>
-        # Note: No "UPDATE" keyword - device expects "DATA user" directly
-        command = f"C:{command_id}:DATA user {chr(9).join(fields)}"
-        return command
+        if password:
+            fields.append(f"Passwd={password}")
+        if card:
+            fields.append(f"Card={card}")
+
+        return f"C:{command_id}:DATA USER {chr(9).join(fields)}"
+
+    @staticmethod
+    def build_update_userinfo_command(
+        command_id: int,
+        pin: str,
+        name: str,
+        privilege: int = 0,
+        password: str = "",
+    ) -> str:
+        """Build DATA UPDATE USERINFO command used by bulk/single device re-sync."""
+        fields = [
+            f"PIN={pin}",
+            f"Name={name}",
+            f"Pri={privilege}",
+            f"Passwd={password or ''}",
+        ]
+        return f"C:{command_id}:DATA UPDATE USERINFO {chr(9).join(fields)}"
+
+    @staticmethod
+    def build_update_biophoto_command(
+        command_id: int,
+        pin: str,
+        content: str,
+        photo_type: int = 9,
+    ) -> str:
+        """Build DATA UPDATE BIOPHOTO command when face/photo template is available."""
+        size = len(content)
+        fields = [
+            f"PIN={pin}",
+            f"Type={photo_type}",
+            f"Size={size}",
+            f"Content={content}",
+        ]
+        return f"C:{command_id}:DATA UPDATE BIOPHOTO {chr(9).join(fields)}"
 
     @staticmethod
     def build_delete_user_command(command_id: int, pin: str) -> str:
-        """
-        Build DATA DELETE user command for removing user from device.
-        
-        Args:
-            command_id: Unique command identifier (must be integer)
-            pin: User PIN to delete
-
-        Returns:
-            Command string in iClock format
-        """
-        return f"C:{command_id}:DATA DELETE user pin={pin}"
+        """Build DATA DELETE USERINFO command for removing user from device."""
+        return f"C:{command_id}:DATA DELETE USERINFO PIN={pin}"

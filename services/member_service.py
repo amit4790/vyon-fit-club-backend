@@ -203,6 +203,28 @@ class MemberService:
         try:
             self.db.commit()
             self.db.refresh(member)
+
+            # Keep device user profile in sync when name changes
+            if settings.device_push_enabled and "full_name" in update_data:
+                try:
+                    push_service = PushDeviceService(self.db)
+                    card_number = str(member.device_card) if member.device_card else None
+                    commands = push_service.sync_member_to_devices(
+                        member_id=member.id,
+                        member_name=member.full_name,
+                        card_number=card_number,
+                    )
+                    logger.info(
+                        f"Queued {len(commands)} user sync commands for member update",
+                        extra={"member_id": member.id, "command_count": len(commands)},
+                    )
+                except Exception as sync_error:
+                    logger.error(
+                        "Failed to queue device sync commands for member update",
+                        extra={"member_id": member.id},
+                        exc_info=sync_error,
+                    )
+
             return member
         except IntegrityError as exc:
             self.db.rollback()
@@ -325,11 +347,45 @@ class MemberService:
             raise MemberNotFoundError("Member not found")
 
         logger.info("Soft deleting member", extra={"member_id": member_id, "mobile_number": member.mobile_number})
+
+        # Queue device delete before soft-delete so PIN (= member.id) is still known.
+        if settings.device_push_enabled:
+            try:
+                push_service = PushDeviceService(self.db)
+                commands = push_service.remove_member_from_devices(member_id=member.id)
+                logger.info(
+                    f"Queued {len(commands)} user delete commands for member",
+                    extra={"member_id": member.id, "command_count": len(commands)},
+                )
+            except Exception as sync_error:
+                logger.error(
+                    "Failed to queue device delete commands for member",
+                    extra={"member_id": member.id},
+                    exc_info=sync_error,
+                )
+
+        # Hard-delete memberships and invoices so soft-delete restore cannot reattach ghost plans.
+        from repositories.invoice_repository import InvoiceRepository
+        from repositories.subscription_repository import SubscriptionRepository
+
+        invoice_repo = InvoiceRepository(self.db)
+        subscription_repo = SubscriptionRepository(self.db)
+        deleted_invoices = invoice_repo.delete_invoices_for_member(member_id)
+        deleted_subscriptions = subscription_repo.delete_subscriptions_for_member(member_id)
+
         member.status = "inactive"
         member.deleted_at = datetime.now(timezone.utc)
 
         try:
             self.db.commit()
+            logger.info(
+                "Member soft-deleted with membership cascade",
+                extra={
+                    "member_id": member_id,
+                    "deleted_invoices": deleted_invoices,
+                    "deleted_subscriptions": deleted_subscriptions,
+                },
+            )
         except Exception:
             self.db.rollback()
             logger.exception("Unexpected error during member delete", extra={"member_id": member_id})

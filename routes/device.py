@@ -23,13 +23,20 @@ Acknowledgment Format:
 Reference: Verified with actual device testing
 """
 
+from datetime import datetime
 import logging
 from typing import Optional
-from fastapi import APIRouter, Depends, Query, Request, Response, Body
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, Body, status as http_status
 from sqlalchemy.orm import Session
 
 from database import get_db
-from services.push_device_service import PushDeviceService
+from dependencies import require_admin_access, require_super_admin
+from models import CommandStatus, DeviceCommand
+from services.push_device_service import (
+    DeviceNotRegisteredError,
+    MemberSyncNotFoundError,
+    PushDeviceService,
+)
 from core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -139,8 +146,8 @@ async def get_device_command(
     
     # Update device last_seen
     service.register_or_update_device(SN)
-    
-    # Get next pending command
+
+    # Get next pending command from the durable queue
     command = service.get_pending_command(SN)
     
     if command:
@@ -349,35 +356,23 @@ async def receive_attendance_data(
     db: Session = Depends(get_db)
 ):
     """
-    Attendance data upload endpoint.
+    Device data upload endpoint (ATTLOG, USERINFO, BIODATA, OPERLOG, etc.).
     
-    The device posts attendance records (check-in/check-out) to this endpoint.
-    Server logs the raw payload for future parsing.
+    The device posts table payloads to this endpoint after capture or QUERY commands.
+    Server logs the raw payload for analysis/processing.
     
     Query Parameters:
     - SN: Device serial number (required)
-    - table: Data type (usually "ATTLOG" for attendance)
+    - table: Data type (ATTLOG, USERINFO, BIODATA, OPERLOG, ...)
     - Stamp: Timestamp (optional)
     
     Request Body:
-    Raw attendance data in ATTLOG format (text/plain)
-    
-    ATTLOG Format (tab-separated):
-    ATTLOG:user_pin\ttimestamp\tstatus\tverify_mode\twork_code\treserved
-    
-    Fields:
-    - user_pin: User PIN/ID on device
-    - timestamp: YYYY-MM-DD HH:MM:SS
-    - status: 0=check-in, 1=check-out, etc.
-    - verify_mode: Verification method (fingerprint, face, card, etc.)
-    - work_code: Work code/department
-    - reserved: Reserved field
+    Raw table data (text/plain)
     
     Example Request:
     POST /iclock/cdata?SN=ZAM230001234&table=ATTLOG&Stamp=1234567890
     Body:
     ATTLOG:123\t2024-01-15 09:30:00\t0\t1\t0\t0
-    ATTLOG:456\t2024-01-15 09:31:00\t0\t1\t0\t0
     
     Example Response:
     OK
@@ -387,16 +382,18 @@ async def receive_attendance_data(
     # Update device last_seen
     service.register_or_update_device(SN)
     
-    # Read raw attendance data
+    table = (request.query_params.get("table") or "").strip().upper()
     body_bytes = await request.body()
     raw_payload = body_bytes.decode('utf-8', errors='replace')
+
+    banner = "USERINFO PAYLOAD RECEIVED" if table == "USERINFO" else "DEVICE PUSH RECEIVED"
     print("\n" + "=" * 80)
-    print("DEVICE PUSH RECEIVED")
+    print(banner)
     print("=" * 80)
     print(f"Method: {request.method}")
     print(f"URL: {request.url}")
     print(f"Query Params: {dict(request.query_params)}")
-    print(f"Table: {request.query_params.get('table')}")
+    print(f"Table: {table or request.query_params.get('table')}")
     print(f"Headers: {dict(request.headers)}")
     print("Payload:")
     print(raw_payload)
@@ -407,22 +404,26 @@ async def receive_attendance_data(
     content_length = request.headers.get('content-length')
     content_length_int = int(content_length) if content_length else len(body_bytes)
     
-    # Log attendance upload
-    attendance_log = service.log_attendance_upload(
+    # Persist raw upload (ATTLOG, USERINFO, and other tables)
+    attendance_log = service.log_device_table_upload(
         device_serial=SN,
         raw_payload=raw_payload,
+        table_name=table or None,
         content_type=content_type,
         content_length=content_length_int
     )
     
     logger.info(
-        f"Attendance data received: {attendance_log.record_count} records from device {SN}",
+        f"Device table data received: table={table or 'UNKNOWN'} "
+        f"records={attendance_log.record_count} from device {SN}",
         extra={
             "device_serial": SN,
+            "table": table or None,
             "record_count": attendance_log.record_count,
             "payload_size": content_length_int,
             "log_id": attendance_log.id,
-            "endpoint": "POST /iclock/cdata"
+            "endpoint": "POST /iclock/cdata",
+            "raw_payload": raw_payload if settings.device_push_log_raw else None,
         }
     )
     
@@ -507,3 +508,87 @@ async def list_device_commands(
             for cmd in commands
         ]
     }
+
+
+# Authenticated device management / re-sync APIs (not part of ADMS /iclock protocol).
+mgmt_router = APIRouter(prefix="/api/device", tags=["Device Sync"])
+
+
+@mgmt_router.get("/devices")
+def list_push_devices(
+    db: Session = Depends(get_db),
+    _session=Depends(require_admin_access),
+):
+    """
+    List registered PUSH devices for admin UI (device_sn resolution).
+    ADMIN and SUPER_ADMIN.
+    """
+    if not settings.device_push_enabled:
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PUSH protocol is not enabled",
+        )
+
+    service = PushDeviceService(db)
+    devices = service.get_all_devices()
+    return {
+        "devices": [
+            {
+                "id": device.id,
+                "serial_number": device.serial_number,
+                "device_name": device.device_name,
+                "is_active": device.is_active,
+                "last_seen": device.last_seen.isoformat() if device.last_seen else None,
+            }
+            for device in devices
+        ]
+    }
+
+
+@mgmt_router.post("/{device_sn}/resync")
+def resync_device_members(
+    device_sn: str,
+    db: Session = Depends(get_db),
+    _session=Depends(require_super_admin),
+):
+    """
+    Bulk re-sync all active members to a device.
+    SUPER_ADMIN only.
+    """
+    if not settings.device_push_enabled:
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PUSH protocol is not enabled",
+        )
+
+    service = PushDeviceService(db)
+    try:
+        return service.resync_all_members_to_device(device_sn)
+    except DeviceNotRegisteredError as exc:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@mgmt_router.post("/{device_sn}/sync-user/{user_id}")
+def sync_single_device_user(
+    device_sn: str,
+    user_id: int,
+    db: Session = Depends(get_db),
+    _session=Depends(require_admin_access),
+):
+    """
+    Re-sync one member (by VYON member id / device PIN) to a device.
+    ADMIN and SUPER_ADMIN.
+    """
+    if not settings.device_push_enabled:
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PUSH protocol is not enabled",
+        )
+
+    service = PushDeviceService(db)
+    try:
+        return service.sync_single_member_to_device(user_id=user_id, device_sn=device_sn)
+    except DeviceNotRegisteredError as exc:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except MemberSyncNotFoundError as exc:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
