@@ -535,9 +535,10 @@ class InvoicePdfService:
         col_split = table_x + (table_w * 0.62)
 
         amount_paid_color = (0.09, 0.47, 0.22) if payload.outstanding_balance <= 0 else (0.72, 0.40, 0.03)
+        safe_discount = max(float(payload.discount_amount or 0), 0.0)
         rows = [
             ("Original Membership Price", self._format_currency(payload.original_price), False, text_dark),
-            ("Discount", self._format_currency(payload.discount_amount), False, text_dark),
+            ("Discount", self._format_currency(safe_discount), False, text_dark),
             ("Taxable Amount", self._format_currency(taxable_amount), False, text_dark),
             ("GST @ 5%", self._format_currency(gst_amount), False, text_dark),
             ("Final Amount Payable", self._format_currency(payload.final_amount_payable), False, text_dark),
