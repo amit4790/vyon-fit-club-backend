@@ -289,13 +289,99 @@ class InvoiceService:
         if not row:
             raise InvoiceNotFoundError("Invoice not found")
 
-        if not row.invoice_pdf_path:
-            raise InvoiceNotFoundError("Invoice PDF is not generated yet")
+        if row.invoice_pdf_path:
+            path = Path(row.invoice_pdf_path)
+            if path.exists():
+                return path
 
-        path = Path(row.invoice_pdf_path)
+        # Render/ephemeral disks wipe stored PDFs on deploy; rebuild from DB snapshot.
+        return self._regenerate_invoice_pdf(row)
+
+    def _regenerate_invoice_pdf(self, invoice) -> Path:
+        subscription = invoice.subscription
+        member = invoice.member
+        if not subscription or not member:
+            raise InvoiceNotFoundError("Invoice PDF cannot be regenerated")
+
+        GST_RATE = Decimal("0.05")
+        final_amount = self._money(
+            invoice.final_amount_received if invoice.final_amount_received is not None else invoice.amount
+        )
+        original_price = self._money(
+            invoice.original_price if invoice.original_price is not None else final_amount
+        )
+        discount_amount = self._money(
+            invoice.discount_amount
+            if invoice.discount_amount is not None
+            else max(original_price - final_amount, Decimal("0.00"))
+        )
+        taxable_amount = self._money(final_amount / (Decimal("1.00") + GST_RATE))
+        gst_amount = self._money(
+            invoice.gst_amount if invoice.gst_amount is not None else (final_amount - taxable_amount)
+        )
+        amount_paid = self._money(
+            invoice.amount_paid_today
+            if invoice.amount_paid_today is not None
+            else (invoice.total_paid if invoice.total_paid is not None else final_amount)
+        )
+        outstanding_balance = self._money(
+            invoice.outstanding_balance
+            if invoice.outstanding_balance is not None
+            else max(final_amount - amount_paid, Decimal("0.00"))
+        )
+
+        payment_date = invoice.payment_date
+        if payment_date is None:
+            issued_at = invoice.issued_at or invoice.created_at
+            payment_date = issued_at.date() if issued_at is not None else datetime.now().date()
+
+        invoice_number = invoice.invoice_number or self._build_invoice_number(invoice.id)
+        pdf_payment_status = (
+            "paid"
+            if outstanding_balance == Decimal("0.00")
+            else ("partial" if amount_paid > Decimal("0.00") else (invoice.status or "pending"))
+        )
+
+        try:
+            pdf_path = self.pdf_service.render_invoice_pdf(
+                InvoicePdfPayload(
+                    invoice_number=invoice_number,
+                    invoice_date=payment_date,
+                    invoice_time=datetime.now().strftime("%I:%M %p"),
+                    member_id=str(member.id),
+                    member_name=member.full_name,
+                    member_phone=member.mobile_number,
+                    member_email=member.email,
+                    plan_label=self._resolve_subscription_name(subscription),
+                    duration_label=self._resolve_subscription_duration_label(subscription),
+                    start_date=subscription.start_date,
+                    end_date=subscription.end_date,
+                    original_price=float(original_price),
+                    discount_amount=float(discount_amount),
+                    taxable_amount=float(taxable_amount),
+                    gst_amount=float(gst_amount),
+                    final_amount_payable=float(final_amount),
+                    amount_paid=float(amount_paid),
+                    outstanding_balance=float(outstanding_balance),
+                    payment_mode=invoice.payment_mode or "-",
+                    transaction_reference=invoice.transaction_reference,
+                    payment_status=pdf_payment_status,
+                    remarks=invoice.notes,
+                    created_by="System",
+                    counsellor=invoice.counsellor,
+                )
+            )
+            invoice.invoice_number = invoice_number
+            invoice.invoice_pdf_path = pdf_path
+            self.db.commit()
+            self.db.refresh(invoice)
+        except Exception:
+            self.db.rollback()
+            raise
+
+        path = Path(pdf_path)
         if not path.exists():
             raise InvoiceNotFoundError("Invoice PDF file not found")
-
         return path
 
     @staticmethod
@@ -305,6 +391,12 @@ class InvoiceService:
     def _to_invoice_response(self, row) -> InvoiceResponse:
         member = row.member
         subscription = row.subscription
+        # Missing files are regenerated on download; expose URL when payment data exists.
+        can_download = (
+            bool(row.invoice_pdf_path)
+            or row.final_amount_received is not None
+            or row.payment_date is not None
+        )
         return InvoiceResponse(
             id=row.id,
             invoice_number=row.invoice_number,
@@ -328,7 +420,7 @@ class InvoiceService:
             payment_date=row.payment_date,
             counsellor=row.counsellor,
             notes=row.notes,
-            invoice_download_url=f"/api/admin/invoices/{row.id}/download" if row.invoice_pdf_path else None,
+            invoice_download_url=f"/api/admin/invoices/{row.id}/download" if can_download else None,
             status=row.status,
             issued_at=row.issued_at,
             paid_at=row.paid_at,
