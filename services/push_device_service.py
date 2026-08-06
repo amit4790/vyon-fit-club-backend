@@ -20,7 +20,7 @@ Reference: ZKTeco PUSH SDK / iClock Protocol Specification
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
@@ -202,7 +202,9 @@ class PushDeviceService:
         device_serial: str,
         command_id: str,
         command: str,
-        max_retries: int = 3
+        max_retries: int = 3,
+        *,
+        commit: bool = True,
     ) -> DeviceCommand:
         """
         Queue a new command for the device.
@@ -212,6 +214,7 @@ class PushDeviceService:
             command_id: Unique command identifier
             command: Command string in iClock format
             max_retries: Maximum retry attempts
+            commit: When False, only stage the row (for bulk queue)
 
         Returns:
             Created DeviceCommand instance
@@ -224,8 +227,11 @@ class PushDeviceService:
             max_retries=max_retries
         )
         self.db.add(device_command)
-        self.db.commit()
-        self.db.refresh(device_command)
+        if commit:
+            self.db.commit()
+            self.db.refresh(device_command)
+        else:
+            self.db.flush()
 
         logger.info(
             f"Command queued: {command_id} for device {device_serial}",
@@ -468,14 +474,23 @@ class PushDeviceService:
         )
 
         queued: List[DeviceCommand] = []
-        for index, member in enumerate(members):
-            queued.extend(
-                self._queue_member_sync_commands(
-                    member=member,
-                    device_serial=device.serial_number,
-                    salt_base=index * 10,
+        synced_at = datetime.now(timezone.utc)
+        try:
+            for index, member in enumerate(members):
+                queued.extend(
+                    self._queue_member_sync_commands(
+                        member=member,
+                        device_serial=device.serial_number,
+                        salt_base=index * 10,
+                        commit=False,
+                    )
                 )
-            )
+                member.device_sync_status = "synced"
+                member.last_device_sync_at = synced_at
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
 
         logger.info(
             "Bulk device re-sync queued",
@@ -518,7 +533,11 @@ class PushDeviceService:
             member=member,
             device_serial=device.serial_number,
             salt_base=user_id,
+            commit=True,
         )
+        member.device_sync_status = "synced"
+        member.last_device_sync_at = datetime.now(timezone.utc)
+        self.db.commit()
 
         logger.info(
             "Single member device sync queued",
@@ -541,6 +560,7 @@ class PushDeviceService:
         member: Any,
         device_serial: str,
         salt_base: int,
+        commit: bool = True,
     ) -> List[DeviceCommand]:
         """Queue USERINFO then optional BIOPHOTO for one member, in order."""
         commands: List[DeviceCommand] = []
@@ -561,6 +581,7 @@ class PushDeviceService:
                 command_id=str(userinfo_cmd_id),
                 command=userinfo_command,
                 max_retries=3,
+                commit=commit,
             )
         )
 
@@ -584,6 +605,7 @@ class PushDeviceService:
                     command_id=str(biophoto_cmd_id),
                     command=biophoto_command,
                     max_retries=3,
+                    commit=commit,
                 )
             )
 
