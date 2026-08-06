@@ -392,7 +392,7 @@ def clear_member_device_mapping(
 @router.get("/members")
 def get_members(
     page: int = Query(1, ge=1, description="Page number"),
-    page_size: int = Query(10, ge=1, le=100, description="Items per page"),
+    page_size: int = Query(10, ge=1, le=500, description="Items per page"),
     search: str | None = Query(None, description="Search by name or mobile number"),
     db: Session = Depends(get_db),
 ) -> MemberListResponse:
@@ -604,7 +604,7 @@ def get_member_subscriptions(member_id: int, db: Session = Depends(get_db)) -> M
 def get_expiring_subscriptions(
     days: int = Query(7, ge=1, le=90, description="Lookahead window in days"),
     page: int = Query(1, ge=1, description="Page number"),
-    page_size: int = Query(10, ge=1, le=100, description="Items per page"),
+    page_size: int = Query(10, ge=1, le=500, description="Items per page"),
     db: Session = Depends(get_db),
 ) -> ExpiringSubscriptionsResponse:
     """Get active subscriptions expiring within the configured window."""
@@ -679,7 +679,7 @@ def get_reports_summary(db: Session = Depends(get_db)) -> ReportsSummaryResponse
 @router.get("/invoices", response_model=InvoiceListResponse)
 def get_invoices(
     page: int = Query(1, ge=1, description="Page number"),
-    page_size: int = Query(10, ge=1, le=100, description="Items per page"),
+    page_size: int = Query(10, ge=1, le=500, description="Items per page"),
     status_filter: str | None = Query(None, alias="status", description="Invoice status filter"),
     member_id: int | None = Query(None, ge=1, description="Filter by member id"),
     db: Session = Depends(get_db),
