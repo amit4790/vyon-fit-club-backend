@@ -117,10 +117,6 @@ class MemberService:
                         member_name=member.full_name,
                         card_number=card_number
                     )
-                    if commands:
-                        member.device_sync_status = "synced"
-                        member.last_device_sync_at = datetime.now(timezone.utc)
-                        self.db.commit()
                     logger.info(
                         f"Queued {len(commands)} user sync commands for new member",
                         extra={"member_id": member.id, "command_count": len(commands)}
@@ -218,10 +214,6 @@ class MemberService:
                         member_name=member.full_name,
                         card_number=card_number,
                     )
-                    if commands:
-                        member.device_sync_status = "synced"
-                        member.last_device_sync_at = datetime.now(timezone.utc)
-                        self.db.commit()
                     logger.info(
                         f"Queued {len(commands)} user sync commands for member update",
                         extra={"member_id": member.id, "command_count": len(commands)},

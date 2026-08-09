@@ -20,6 +20,7 @@ Reference: ZKTeco PUSH SDK / iClock Protocol Specification
 """
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
@@ -182,6 +183,8 @@ class PushDeviceService:
         if not success:
             command.error_message = response_data
 
+        self._apply_member_sync_status_from_ack(command, success=success)
+
         self.db.commit()
         self.db.refresh(command)
 
@@ -196,6 +199,36 @@ class PushDeviceService:
         )
 
         return command
+
+    def _apply_member_sync_status_from_ack(self, command: DeviceCommand, *, success: bool) -> None:
+        """Mark member synced only after a successful USER/USERINFO device ACK."""
+        from models import Member
+
+        raw_command = command.command or ""
+        upper = raw_command.upper()
+        if "DELETE" in upper:
+            return
+        if "USERINFO" not in upper and not re.search(r"\bDATA\s+USER\b", upper):
+            return
+
+        pin_match = re.search(r"PIN=(\d+)", raw_command, re.IGNORECASE)
+        if not pin_match:
+            return
+
+        member = self.db.query(Member).filter(Member.id == int(pin_match.group(1))).first()
+        if not member:
+            return
+
+        if success:
+            member.device_sync_status = "synced"
+            member.last_device_sync_at = datetime.now(timezone.utc)
+        else:
+            member.device_sync_status = "failed"
+
+    @staticmethod
+    def _mark_member_sync_pending(member: Any) -> None:
+        member.device_sync_status = "pending"
+        member.last_device_sync_at = None
 
     def queue_command(
         self,
@@ -404,7 +437,15 @@ class PushDeviceService:
                     "command_id": command_id,
                 },
             )
-        
+
+        if commands:
+            from models import Member
+
+            member = self.db.query(Member).filter(Member.id == member_id).first()
+            if member:
+                self._mark_member_sync_pending(member)
+                self.db.commit()
+
         return commands
 
     def remove_member_from_devices(self, member_id: int) -> List[DeviceCommand]:
@@ -474,7 +515,6 @@ class PushDeviceService:
         )
 
         queued: List[DeviceCommand] = []
-        synced_at = datetime.now(timezone.utc)
         try:
             for index, member in enumerate(members):
                 queued.extend(
@@ -485,8 +525,7 @@ class PushDeviceService:
                         commit=False,
                     )
                 )
-                member.device_sync_status = "synced"
-                member.last_device_sync_at = synced_at
+                self._mark_member_sync_pending(member)
             self.db.commit()
         except Exception:
             self.db.rollback()
@@ -535,8 +574,7 @@ class PushDeviceService:
             salt_base=user_id,
             commit=True,
         )
-        member.device_sync_status = "synced"
-        member.last_device_sync_at = datetime.now(timezone.utc)
+        self._mark_member_sync_pending(member)
         self.db.commit()
 
         logger.info(
