@@ -41,7 +41,7 @@ from schemas.invoice import (
     InvoiceOperationResponse,
     InvoiceStatusUpdateRequest,
 )
-from schemas.report import ReportsSummaryResponse
+from schemas.report import ReportsSummaryResponse, UpdateTargetRevenueRequest, UpdateTargetRevenueResponse
 from schemas.subscription import (
     AssignSubscriptionRequest,
     ChangeSubscriptionPlanRequest,
@@ -674,6 +674,16 @@ def get_reports_summary(db: Session = Depends(get_db)) -> ReportsSummaryResponse
     """Get live summary metrics for reports module."""
     summary = ReportService(db).get_summary()
     return ReportsSummaryResponse(message="Reports summary", data=summary)
+
+
+@router.patch("/reports/target-revenue", response_model=UpdateTargetRevenueResponse)
+def update_target_revenue(
+    payload: UpdateTargetRevenueRequest,
+    db: Session = Depends(get_db),
+) -> UpdateTargetRevenueResponse:
+    """Update editable target revenue used by Reports."""
+    summary = ReportService(db).update_target_revenue(payload.target_revenue)
+    return UpdateTargetRevenueResponse(message="Target revenue updated", data=summary)
 
 
 @router.get("/invoices", response_model=InvoiceListResponse)

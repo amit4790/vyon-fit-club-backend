@@ -10,6 +10,7 @@ from .user import User
 from .push_device import PushDevice
 from .device_command import DeviceCommand, CommandStatus
 from .device_attendance_log import DeviceAttendanceLog
+from .business_setting import BusinessSetting
 
 __all__ = [
 	"User",
@@ -23,4 +24,5 @@ __all__ = [
 	"DeviceCommand",
 	"CommandStatus",
 	"DeviceAttendanceLog",
+	"BusinessSetting",
 ]

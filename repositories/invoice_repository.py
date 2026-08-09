@@ -105,8 +105,11 @@ class InvoiceRepository:
         collected_revenue = self.db.execute(
             select(func.coalesce(func.sum(Invoice.amount), 0)).where(Invoice.status == "paid")
         ).scalar_one()
-        pending_revenue = self.db.execute(
-            select(func.coalesce(func.sum(Invoice.amount), 0)).where(Invoice.status == "pending")
+        outstanding_expr = func.coalesce(Invoice.outstanding_balance, Invoice.amount)
+        outstanding_revenue = self.db.execute(
+            select(func.coalesce(func.sum(outstanding_expr), 0)).where(
+                Invoice.status.in_(("pending", "partial"))
+            )
         ).scalar_one()
         average_invoice_value = self.db.execute(
             select(func.coalesce(func.avg(Invoice.amount), 0))
@@ -117,7 +120,7 @@ class InvoiceRepository:
             "paid_invoices": int(paid_invoices or 0),
             "pending_invoices": int((pending_invoices or 0) + (partial_invoices or 0)),
             "collected_revenue": float(collected_revenue or 0),
-            "pending_revenue": float(pending_revenue or 0),
+            "outstanding_revenue": float(outstanding_revenue or 0),
             "average_invoice_value": float(average_invoice_value or 0),
         }
 
