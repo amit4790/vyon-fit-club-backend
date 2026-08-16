@@ -448,6 +448,74 @@ class PushDeviceService:
 
         return commands
 
+    def sync_trainer_to_devices(self, trainer_id: int, trainer_name: str) -> List[DeviceCommand]:
+        """Queue USERINFO for a trainer using PIN = 50000 + trainer_id."""
+        from core.device_pins import trainer_pin
+
+        devices = self.db.query(PushDevice).filter(PushDevice.is_active == True).all()
+        if not devices:
+            logger.warning(
+                "No active PUSH devices found for trainer sync",
+                extra={"trainer_id": trainer_id},
+            )
+            return []
+
+        pin = trainer_pin(trainer_id)
+        commands: List[DeviceCommand] = []
+        for index, device in enumerate(devices):
+            command_id = self._next_command_id(member_id=pin, salt=index + 700)
+            command_str = UserSyncCommand.build_update_userinfo_command(
+                command_id=command_id,
+                pin=str(pin),
+                name=trainer_name,
+                privilege=0,
+                password="",
+            )
+            commands.append(
+                self.queue_command(
+                    device_serial=device.serial_number,
+                    command_id=str(command_id),
+                    command=command_str,
+                    max_retries=3,
+                )
+            )
+            logger.info(
+                f"Queued trainer sync command for trainer {trainer_id} pin={pin}",
+                extra={
+                    "trainer_id": trainer_id,
+                    "pin": pin,
+                    "device_serial": device.serial_number,
+                    "command_id": command_id,
+                },
+            )
+        return commands
+
+    def remove_trainer_from_devices(self, trainer_id: int) -> List[DeviceCommand]:
+        """Queue DELETE USERINFO for a trainer PIN."""
+        from core.device_pins import trainer_pin
+
+        devices = self.db.query(PushDevice).filter(PushDevice.is_active == True).all()
+        if not devices:
+            return []
+
+        pin = trainer_pin(trainer_id)
+        commands: List[DeviceCommand] = []
+        for index, device in enumerate(devices):
+            command_id = self._next_command_id(member_id=pin, salt=index + 800)
+            command_str = UserSyncCommand.build_delete_user_command(
+                command_id=command_id,
+                pin=str(pin),
+            )
+            commands.append(
+                self.queue_command(
+                    device_serial=device.serial_number,
+                    command_id=str(command_id),
+                    command=command_str,
+                    max_retries=3,
+                )
+            )
+        return commands
+
     def remove_member_from_devices(self, member_id: int) -> List[DeviceCommand]:
         """
         Queue user delete commands for all active PUSH devices.

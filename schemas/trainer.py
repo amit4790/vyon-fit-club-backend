@@ -20,9 +20,9 @@ class TrainerBase(BaseModel):
 
 
 class TrainerCreateRequest(TrainerBase):
-    """Request model for creating a trainer."""
+    """Request model for creating a trainer (no app login)."""
 
-    temporary_password: str = Field(..., min_length=6, max_length=128)
+    temporary_password: str | None = Field(default=None, min_length=6, max_length=128)
 
 
 class TrainerUpdateRequest(BaseModel):
@@ -68,3 +68,9 @@ class TrainerOperationResponse(BaseModel):
 
 class TrainerDeleteResponse(BaseModel):
     message: str
+
+
+class TrainerDeviceSyncResponse(BaseModel):
+    message: str
+    trainers_queued: int
+    commands_queued: int

@@ -412,6 +412,24 @@ async def receive_attendance_data(
         content_type=content_type,
         content_length=content_length_int
     )
+
+    if table == "ATTLOG" and raw_payload.strip():
+        try:
+            from services.attendance_service import AttendanceService
+
+            inserted = AttendanceService(db).ingest_attlog_payload(
+                device_serial=SN,
+                raw_payload=raw_payload,
+            )
+            attendance_log.is_processed = True
+            attendance_log.processed_at = datetime.utcnow()
+            db.commit()
+            logger.info(
+                f"ATTLOG parsed into attendance punches: inserted={inserted}",
+                extra={"device_serial": SN, "inserted": inserted},
+            )
+        except Exception:
+            logger.exception("Failed to parse ATTLOG into attendance punches", extra={"device_serial": SN})
     
     logger.info(
         f"Device table data received: table={table or 'UNKNOWN'} "

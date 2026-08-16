@@ -4,7 +4,7 @@ Handles admin dashboard and management endpoints.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -52,9 +52,17 @@ from schemas.subscription import (
     PlanPriceUpdateRequest,
     SubscriptionOperationResponse,
 )
+from schemas.attendance import (
+    AttendancePurgeResponse,
+    DailyAttendanceResponse,
+    DailyAttendanceRow,
+    MonthlyAttendanceResponse,
+    MonthlyAttendanceRow,
+)
 from schemas.trainer import (
     TrainerCreateRequest,
     TrainerDeleteResponse,
+    TrainerDeviceSyncResponse,
     TrainerListResponse,
     TrainerOperationResponse,
     TrainerResponse,
@@ -82,6 +90,7 @@ from services.device_service import (
     DeviceValidationError,
 )
 from services.report_service import ReportService
+from services.attendance_service import AttendanceService, RETENTION_DAYS
 from services.invoice_service import (
     InvalidPaymentAmountError,
     InvalidInvoiceStatusTransitionError,
@@ -686,6 +695,110 @@ def update_target_revenue(
     return UpdateTargetRevenueResponse(message="Target revenue updated", data=summary)
 
 
+@router.get("/attendance/daily", response_model=DailyAttendanceResponse)
+def get_daily_trainer_attendance(
+    day: str = Query(..., description="Date in YYYY-MM-DD"),
+    db: Session = Depends(get_db),
+) -> DailyAttendanceResponse:
+    """Trainer check-ins for a single day (first punch per trainer)."""
+    from datetime import date as date_cls
+
+    try:
+        parsed_day = date_cls.fromisoformat(day)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid date") from exc
+
+    rows = AttendanceService(db).get_daily_trainer_attendance(parsed_day)
+    return DailyAttendanceResponse(
+        message="Daily trainer attendance",
+        date=parsed_day.isoformat(),
+        data=[
+            DailyAttendanceRow(
+                person_id=row.person_id,
+                person_name=row.person_name,
+                specialization=row.specialization,
+                pin=row.pin,
+                punched_at=row.punched_at,
+                is_late=row.is_late,
+            )
+            for row in rows
+        ],
+    )
+
+
+@router.get("/attendance/monthly", response_model=MonthlyAttendanceResponse)
+def get_monthly_trainer_attendance(
+    year: int = Query(..., ge=2020, le=2100),
+    month: int = Query(..., ge=1, le=12),
+    db: Session = Depends(get_db),
+) -> MonthlyAttendanceResponse:
+    """Monthly trainer attendance summary for salary review."""
+    rows = AttendanceService(db).get_monthly_trainer_summary(year, month)
+    return MonthlyAttendanceResponse(
+        message="Monthly trainer attendance",
+        year=year,
+        month=month,
+        data=[
+            MonthlyAttendanceRow(
+                person_id=row.person_id,
+                person_name=row.person_name,
+                specialization=row.specialization,
+                days_present=row.days_present,
+                on_time_days=row.on_time_days,
+                late_days=row.late_days,
+                last_check_in=row.last_check_in,
+            )
+            for row in rows
+        ],
+    )
+
+
+@router.get("/attendance/export")
+def export_monthly_trainer_attendance(
+    year: int = Query(..., ge=2020, le=2100),
+    month: int = Query(..., ge=1, le=12),
+    db: Session = Depends(get_db),
+) -> Response:
+    """Download trainer attendance CSV for a month within the retention window."""
+    from datetime import date as date_cls
+
+    today = date_cls.today()
+    requested = date_cls(year, month, 1)
+    oldest_allowed = date_cls(today.year, today.month, 1)
+    # Allow current month and previous 2 months (approx 3-month window).
+    for _ in range(2):
+        if oldest_allowed.month == 1:
+            oldest_allowed = date_cls(oldest_allowed.year - 1, 12, 1)
+        else:
+            oldest_allowed = date_cls(oldest_allowed.year, oldest_allowed.month - 1, 1)
+
+    if requested < oldest_allowed or requested > date_cls(today.year, today.month, 1):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Export is limited to the last {RETENTION_DAYS // 30} months of attendance data",
+        )
+
+    csv_text = AttendanceService(db).build_month_csv(year, month)
+    filename = f"trainer-attendance-{year}-{month:02d}.csv"
+    return Response(
+        content=csv_text,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/attendance/purge", response_model=AttendancePurgeResponse)
+def purge_old_attendance(db: Session = Depends(get_db)) -> AttendancePurgeResponse:
+    """Delete attendance punches and raw logs older than retention window."""
+    result = AttendanceService(db).purge_old_records()
+    return AttendancePurgeResponse(
+        message="Old attendance data purged",
+        punches_deleted=result["punches_deleted"],
+        raw_logs_deleted=result["raw_logs_deleted"],
+        retention_days=result["retention_days"],
+    )
+
+
 @router.get("/invoices", response_model=InvoiceListResponse)
 def get_invoices(
     page: int = Query(1, ge=1, description="Page number"),
@@ -809,6 +922,17 @@ def get_trainers(db: Session = Depends(get_db)) -> TrainerListResponse:
             )
             for trainer in trainers
         ],
+    )
+
+
+@router.post("/trainers/sync-devices", response_model=TrainerDeviceSyncResponse)
+def sync_trainers_to_devices(db: Session = Depends(get_db)) -> TrainerDeviceSyncResponse:
+    """Queue USERINFO for all active trainers (PIN = 50000 + id)."""
+    result = TrainerService(db).sync_all_active_trainers_to_devices()
+    return TrainerDeviceSyncResponse(
+        message="Active trainers queued for device sync",
+        trainers_queued=result["trainers_queued"],
+        commands_queued=result["commands_queued"],
     )
 
 
