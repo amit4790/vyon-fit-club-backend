@@ -69,9 +69,12 @@ from schemas.trainer import (
     TrainerUpdateRequest,
 )
 from schemas.trainer_detail import (
+    AssignMemberToTrainerRequest,
+    AssignMemberToTrainerResponse,
     TrainerAssignedMember,
     TrainerDetailOperationResponse,
     TrainerDetailResponse,
+    UnassignMemberFromTrainerResponse,
 )
 from services.member_service import (
     DuplicateDeviceIdentifierError,
@@ -108,6 +111,8 @@ from services.subscription_service import (
 from services.trainer_service import (
     DuplicateTrainerEmailError,
     DuplicateTrainerPhoneError,
+    MemberAlreadyAssignedError,
+    MemberNotFoundError as TrainerMemberNotFoundError,
     TrainerNotFoundError,
     TrainerService,
 )
@@ -919,6 +924,7 @@ def get_trainers(db: Session = Depends(get_db)) -> TrainerListResponse:
                 specialization=trainer.specialization,
                 role=trainer.role,
                 is_active=trainer.is_active,
+                assigned_member_count=service.get_assigned_member_count(trainer.id),
             )
             for trainer in trainers
         ],
@@ -954,16 +960,101 @@ def get_trainer_by_id(trainer_id: int, db: Session = Depends(get_db)) -> Trainer
             specialization=trainer.specialization,
             role=trainer.role,
             is_active=trainer.is_active,
+            assigned_member_count=len(assigned_members),
             assigned_members=[
                 TrainerAssignedMember(
                     id=item.id,
                     full_name=item.full_name,
                     mobile_number=item.mobile_number,
+                    status=item.status,
+                    assigned_at=item.trainer_assigned_at,
                 )
                 for item in assigned_members
             ],
         ),
     )
+
+
+@router.get("/trainers/{trainer_id}/assignable-members")
+def search_assignable_members_for_trainer(
+    trainer_id: int,
+    search: str | None = Query(None, description="Search by name or mobile"),
+    db: Session = Depends(get_db),
+):
+    """Search active members that can be assigned to this trainer."""
+    service = TrainerService(db)
+    try:
+        members = service.search_assignable_members(trainer_id, search=search)
+    except TrainerNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    return {
+        "message": "Assignable members",
+        "data": [
+            {
+                "id": member.id,
+                "full_name": member.full_name,
+                "mobile_number": member.mobile_number,
+                "status": member.status,
+                "current_trainer_id": member.trainer_id,
+            }
+            for member in members
+        ],
+    }
+
+
+@router.post(
+    "/trainers/{trainer_id}/members",
+    response_model=AssignMemberToTrainerResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def assign_member_to_trainer(
+    trainer_id: int,
+    payload: AssignMemberToTrainerRequest,
+    db: Session = Depends(get_db),
+) -> AssignMemberToTrainerResponse:
+    """Assign a PT member to a trainer (brought by trainer or balanced assignment)."""
+    service = TrainerService(db)
+    try:
+        member = service.assign_member(trainer_id, payload.member_id)
+    except TrainerNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except TrainerMemberNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except MemberAlreadyAssignedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    return AssignMemberToTrainerResponse(
+        message="Member assigned to trainer",
+        data=TrainerAssignedMember(
+            id=member.id,
+            full_name=member.full_name,
+            mobile_number=member.mobile_number,
+            status=member.status,
+            assigned_at=member.trainer_assigned_at,
+        ),
+    )
+
+
+@router.delete(
+    "/trainers/{trainer_id}/members/{member_id}",
+    response_model=UnassignMemberFromTrainerResponse,
+)
+def unassign_member_from_trainer(
+    trainer_id: int,
+    member_id: int,
+    db: Session = Depends(get_db),
+) -> UnassignMemberFromTrainerResponse:
+    """Remove a member from a trainer's PT list."""
+    service = TrainerService(db)
+    try:
+        service.unassign_member(trainer_id, member_id)
+    except TrainerNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except TrainerMemberNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    return UnassignMemberFromTrainerResponse(message="Member unassigned from trainer")
 
 
 @router.post("/users/admins", response_model=AdminUserOperationResponse, status_code=status.HTTP_201_CREATED)

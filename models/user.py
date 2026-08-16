@@ -34,7 +34,15 @@ class User(Base):
         nullable=False,
     )
 
-    member_profile: Mapped["Member | None"] = relationship(back_populates="user", uselist=False)
+    member_profile: Mapped["Member | None"] = relationship(
+        back_populates="user",
+        uselist=False,
+        foreign_keys="Member.user_id",
+    )
+    assigned_pt_members: Mapped[list["Member"]] = relationship(
+        foreign_keys="Member.trainer_id",
+        back_populates="trainer",
+    )
     sent_messages: Mapped[list["Message"]] = relationship(
         back_populates="sender",
         foreign_keys="Message.sender_id",

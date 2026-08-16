@@ -51,6 +51,7 @@ class TrainerResponse(BaseModel):
     specialization: str | None
     role: str
     is_active: bool
+    assigned_member_count: int = 0
 
     class Config:
         from_attributes = True

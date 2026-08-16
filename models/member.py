@@ -37,6 +37,13 @@ class Member(Base):
     device_card: Mapped[int | None] = mapped_column(Integer, nullable=True)
     device_sync_status: Mapped[str] = mapped_column(String(20), nullable=False, default="unlinked")
     last_device_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    trainer_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    trainer_assignment_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    trainer_assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     joined_at: Mapped[date] = mapped_column(Date, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -48,7 +55,14 @@ class Member(Base):
         nullable=False,
     )
 
-    user: Mapped["User | None"] = relationship(back_populates="member_profile")
+    user: Mapped["User | None"] = relationship(
+        back_populates="member_profile",
+        foreign_keys=[user_id],
+    )
+    trainer: Mapped["User | None"] = relationship(
+        back_populates="assigned_pt_members",
+        foreign_keys=[trainer_id],
+    )
     subscriptions: Mapped[list["MembershipSubscription"]] = relationship(back_populates="member")
     invoices: Mapped[list["Invoice"]] = relationship(back_populates="member")
     feedback_entries: Mapped[list["Feedback"]] = relationship(back_populates="member")

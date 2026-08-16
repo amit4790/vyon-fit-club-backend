@@ -40,6 +40,52 @@ class MemberRepository:
 
         return members, total_items
 
+    def list_members_for_trainer(self, trainer_id: int) -> list[Member]:
+        statement = (
+            select(Member)
+            .where(
+                Member.deleted_at.is_(None),
+                Member.trainer_id == trainer_id,
+            )
+            .order_by(Member.full_name.asc(), Member.id.asc())
+        )
+        return list(self.db.execute(statement).scalars().all())
+
+    def count_members_for_trainer(self, trainer_id: int) -> int:
+        statement = select(func.count(Member.id)).where(
+            Member.deleted_at.is_(None),
+            Member.trainer_id == trainer_id,
+        )
+        return int(self.db.execute(statement).scalar_one())
+
+    def search_assignable_members(
+        self,
+        *,
+        search: str | None,
+        exclude_trainer_id: int | None = None,
+        limit: int = 20,
+    ) -> list[Member]:
+        """Active members available to assign (optionally excluding already on this trainer)."""
+        query: Select[tuple[Member]] = select(Member).where(
+            Member.deleted_at.is_(None),
+            Member.status == "active",
+        )
+        if exclude_trainer_id is not None:
+            query = query.where(
+                or_(Member.trainer_id.is_(None), Member.trainer_id != exclude_trainer_id)
+            )
+        if search and search.strip():
+            search_term = f"%{search.strip()}%"
+            query = query.where(
+                or_(
+                    Member.full_name.ilike(search_term),
+                    Member.mobile_number.ilike(search_term),
+                )
+            )
+        return list(
+            self.db.execute(query.order_by(Member.full_name.asc()).limit(limit)).scalars().all()
+        )
+
     def get_member_by_id(self, member_id: int) -> Member | None:
         statement = select(Member).where(Member.id == member_id, Member.deleted_at.is_(None))
         return self.db.execute(statement).scalar_one_or_none()
