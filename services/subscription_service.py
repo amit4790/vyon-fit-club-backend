@@ -297,8 +297,6 @@ class SubscriptionService:
             raise PlanNotFoundError("Membership plan not found")
 
         effective_start = start_date or row.start_date
-        if effective_start > date.today():
-            raise SubscriptionConflictError("Start Date cannot be in the future")
 
         effective_duration_value = duration_value if duration_value is not None else plan.duration_months
         effective_duration_unit = duration_unit if duration_unit is not None else "months"
