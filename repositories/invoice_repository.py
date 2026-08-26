@@ -46,6 +46,17 @@ class InvoiceRepository:
         )
         return self.db.execute(statement).scalar_one_or_none()
 
+    def list_invoices_for_subscription_ids(self, subscription_ids: list[int]) -> list[Invoice]:
+        if not subscription_ids:
+            return []
+
+        statement = (
+            select(Invoice)
+            .where(Invoice.subscription_id.in_(subscription_ids))
+            .order_by(Invoice.created_at.desc(), Invoice.id.desc())
+        )
+        return list(self.db.execute(statement).scalars().all())
+
     def delete_invoices_for_member(self, member_id: int) -> int:
         """Permanently delete all invoices for a member. Returns deleted count."""
         statement = select(Invoice).where(Invoice.member_id == member_id)

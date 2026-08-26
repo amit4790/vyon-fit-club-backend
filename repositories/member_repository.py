@@ -4,8 +4,34 @@ Member repository for database operations.
 
 from sqlalchemy import Select, func, or_, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from models import Member
+
+
+def member_search_filter(search: str | None) -> ColumnElement[bool] | None:
+    """Match name, mobile, or member ID (exact when the query is numeric)."""
+    if not search or not search.strip():
+        return None
+
+    raw = search.strip()
+    search_term = f"%{raw}%"
+    clauses: list[ColumnElement[bool]] = [
+        Member.full_name.ilike(search_term),
+        Member.mobile_number.ilike(search_term),
+    ]
+
+    id_query = raw
+    lowered = raw.lower()
+    if lowered.startswith("id"):
+        id_query = raw[2:].lstrip(" \t:#")
+    elif raw.startswith("#"):
+        id_query = raw[1:].strip()
+
+    if id_query.isdigit():
+        clauses.append(Member.id == int(id_query))
+
+    return or_(*clauses)
 
 
 class MemberRepository:
@@ -18,12 +44,8 @@ class MemberRepository:
         query: Select[tuple[Member]] = select(Member).where(Member.deleted_at.is_(None))
         count_query = select(func.count(Member.id)).where(Member.deleted_at.is_(None))
 
-        if search:
-            search_term = f"%{search.strip()}%"
-            search_filter = or_(
-                Member.full_name.ilike(search_term),
-                Member.mobile_number.ilike(search_term),
-            )
+        search_filter = member_search_filter(search)
+        if search_filter is not None:
             query = query.where(search_filter)
             count_query = count_query.where(search_filter)
 
@@ -39,6 +61,10 @@ class MemberRepository:
         )
 
         return members, total_items
+
+    def list_non_deleted_members(self) -> list[Member]:
+        statement = select(Member).where(Member.deleted_at.is_(None)).order_by(Member.id.asc())
+        return list(self.db.execute(statement).scalars().all())
 
     def list_members_for_trainer(self, trainer_id: int) -> list[Member]:
         statement = (
@@ -74,14 +100,9 @@ class MemberRepository:
             query = query.where(
                 or_(Member.trainer_id.is_(None), Member.trainer_id != exclude_trainer_id)
             )
-        if search and search.strip():
-            search_term = f"%{search.strip()}%"
-            query = query.where(
-                or_(
-                    Member.full_name.ilike(search_term),
-                    Member.mobile_number.ilike(search_term),
-                )
-            )
+        search_filter = member_search_filter(search)
+        if search_filter is not None:
+            query = query.where(search_filter)
         return list(
             self.db.execute(query.order_by(Member.full_name.asc()).limit(limit)).scalars().all()
         )

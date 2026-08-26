@@ -3,6 +3,8 @@ Admin routes for VYON FIT CLUB.
 Handles admin dashboard and management endpoints.
 """
 
+from datetime import date
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse, Response
 from sqlalchemy import select
@@ -76,6 +78,7 @@ from schemas.trainer_detail import (
     TrainerDetailResponse,
     UnassignMemberFromTrainerResponse,
 )
+from services.member_export_service import MemberExportService
 from services.member_service import (
     DuplicateDeviceIdentifierError,
     DuplicateMobileError,
@@ -407,7 +410,7 @@ def clear_member_device_mapping(
 def get_members(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(10, ge=1, le=500, description="Items per page"),
-    search: str | None = Query(None, description="Search by name or mobile number"),
+    search: str | None = Query(None, description="Search by member ID, name or mobile number"),
     db: Session = Depends(get_db),
 ) -> MemberListResponse:
     """
@@ -429,6 +432,18 @@ def get_members(
             total_items=total_items,
             total_pages=total_pages,
         ),
+    )
+
+
+@router.get("/members/export")
+def export_members(db: Session = Depends(get_db)) -> Response:
+    """Download all members as Excel, sorted by membership end date (soonest first)."""
+    workbook_bytes = MemberExportService(db).build_xlsx()
+    filename = f"vyon-members-{date.today().isoformat()}.xlsx"
+    return Response(
+        content=workbook_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

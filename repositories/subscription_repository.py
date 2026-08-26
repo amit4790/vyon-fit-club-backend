@@ -86,6 +86,17 @@ class SubscriptionRepository:
         )
         return self.db.execute(statement).scalars().all()
 
+    def list_subscriptions_for_member_ids(self, member_ids: list[int]) -> list[MembershipSubscription]:
+        if not member_ids:
+            return []
+
+        statement = (
+            select(MembershipSubscription)
+            .options(joinedload(MembershipSubscription.plan))
+            .where(MembershipSubscription.member_id.in_(member_ids))
+        )
+        return list(self.db.execute(statement).unique().scalars().all())
+
     def list_expiring_subscriptions(
         self,
         *,
