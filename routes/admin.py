@@ -411,13 +411,28 @@ def get_members(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(10, ge=1, le=500, description="Items per page"),
     search: str | None = Query(None, description="Search by member ID, name or mobile number"),
+    membership_status: str | None = Query(
+        None,
+        description=(
+            "Filter by membership display status: "
+            "active, active_pending_payment, inactive_unpaid, expired, none"
+        ),
+    ),
     db: Session = Depends(get_db),
 ) -> MemberListResponse:
     """
     Get paginated list of members.
     """
     service = MemberService(db)
-    members, total_items = service.list_members(page=page, page_size=page_size, search=search)
+    try:
+        members, total_items = service.list_members(
+            page=page,
+            page_size=page_size,
+            search=search,
+            membership_status=membership_status,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     total_pages = total_items // page_size + (1 if total_items % page_size else 0)
     if total_items == 0:

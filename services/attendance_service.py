@@ -212,7 +212,7 @@ class AttendanceService:
         output = io.StringIO()
         writer = csv.writer(output)
         writer.writerow(
-            ["date", "check_in_time", "trainer_id", "trainer_name", "specialization", "pin", "status"]
+            ["date", "check_in_time", "trainer_id", "trainer_name", "specialization", "pin"]
         )
         for punch in punches:
             trainer = trainers.get(punch.person_id)
@@ -225,7 +225,6 @@ class AttendanceService:
                     trainer.full_name if trainer else f"Trainer #{punch.person_id}",
                     trainer.specialization if trainer else "",
                     punch.pin,
-                    "Late" if self._is_late(punch.punched_at) else "On time",
                 ]
             )
         return output.getvalue()

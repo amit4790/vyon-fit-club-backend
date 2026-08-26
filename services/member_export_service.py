@@ -31,14 +31,22 @@ _HEADERS = [
     "Gender",
     "Membership Name",
     "Membership Start Date",
+    "Membership End Date",
+    "Status",
     "Membership Cost",
     "Discount",
     "Amount Paid",
-    "Outstanding",
-    "Membership End Date",
-    "Status",
     "Counsellor",
 ]
+
+# Query-param keys used by the Members list filter (must match frontend).
+MEMBERSHIP_STATUS_FILTERS: dict[str, str] = {
+    "active": "Active",
+    "active_pending_payment": "Active - Pending Payment",
+    "inactive_unpaid": "Inactive (Unpaid)",
+    "expired": "Expired",
+    "none": "No Membership",
+}
 
 
 @dataclass
@@ -49,12 +57,11 @@ class MemberExportRow:
     gender: str
     membership_name: str | None
     start_date: date | None
+    end_date: date | None
+    status: str
     membership_cost: Decimal | None
     discount: Decimal | None
     amount_paid: Decimal | None
-    outstanding: Decimal | None
-    end_date: date | None
-    status: str
     counsellor: str | None
 
 
@@ -89,8 +96,8 @@ class MemberExportService:
             cell.alignment = header_alignment
             cell.border = thin
 
-        money_columns = {7, 8, 9, 10}
-        date_columns = {6, 11}
+        money_columns = {9, 10, 11}
+        date_columns = {6, 7}
 
         for row_index, row in enumerate(rows, start=2):
             values = [
@@ -100,12 +107,11 @@ class MemberExportService:
                 row.gender,
                 row.membership_name,
                 row.start_date,
+                row.end_date,
+                row.status,
                 row.membership_cost,
                 row.discount,
                 row.amount_paid,
-                row.outstanding,
-                row.end_date,
-                row.status,
                 row.counsellor,
             ]
             for col_index, value in enumerate(values, start=1):
@@ -126,8 +132,18 @@ class MemberExportService:
         workbook.save(buffer)
         return buffer.getvalue()
 
+    def build_rows_for_search(self, search: str | None = None) -> list[MemberExportRow]:
+        """Build export-style rows for members matching an optional search."""
+        members = self.member_repo.list_members_matching_search(search)
+        return self._build_rows_for_members(members)
+
     def _build_rows(self) -> list[MemberExportRow]:
         members = self.member_repo.list_non_deleted_members()
+        rows = self._build_rows_for_members(members)
+        rows.sort(key=lambda row: (row.end_date is None, row.end_date or date.max, row.member_id))
+        return rows
+
+    def _build_rows_for_members(self, members: list[Member]) -> list[MemberExportRow]:
         member_ids = [member.id for member in members]
         subscriptions = self.subscription_repo.list_subscriptions_for_member_ids(member_ids)
 
@@ -144,7 +160,7 @@ class MemberExportService:
                 latest_invoice_by_subscription[invoice.subscription_id] = invoice
 
         today = date.today()
-        rows = [
+        return [
             self._row_for_member(
                 member,
                 subscriptions_by_member.get(member.id, []),
@@ -153,8 +169,6 @@ class MemberExportService:
             )
             for member in members
         ]
-        rows.sort(key=lambda row: (row.end_date is None, row.end_date or date.max, row.member_id))
-        return rows
 
     def _row_for_member(
         self,
@@ -174,12 +188,11 @@ class MemberExportService:
                 gender=gender_label,
                 membership_name=None,
                 start_date=None,
+                end_date=None,
+                status="No Membership",
                 membership_cost=None,
                 discount=None,
                 amount_paid=None,
-                outstanding=None,
-                end_date=None,
-                status="No Membership",
                 counsellor=None,
             )
 
@@ -199,12 +212,11 @@ class MemberExportService:
                 gender=gender_label,
                 membership_name=_plan_name(focus),
                 start_date=focus.start_date,
+                end_date=focus.end_date,
+                status=_active_status_label(money.payment_status),
                 membership_cost=money.cost,
                 discount=money.discount,
                 amount_paid=money.amount_paid,
-                outstanding=money.outstanding,
-                end_date=focus.end_date,
-                status=_active_status_label(money.payment_status),
                 counsellor=money.counsellor,
             )
 
@@ -218,12 +230,11 @@ class MemberExportService:
             gender=gender_label,
             membership_name=_plan_name(latest),
             start_date=latest.start_date,
+            end_date=latest.end_date,
+            status="Expired",
             membership_cost=money.cost,
             discount=money.discount,
             amount_paid=money.amount_paid,
-            outstanding=money.outstanding,
-            end_date=latest.end_date,
-            status="Expired",
             counsellor=money.counsellor,
         )
 
@@ -336,13 +347,12 @@ def _autosize_columns(sheet: Worksheet) -> None:
         4: 12,
         5: 28,
         6: 22,
-        7: 16,
-        8: 12,
-        9: 14,
-        10: 14,
-        11: 22,
-        12: 26,
-        13: 22,
+        7: 22,
+        8: 26,
+        9: 16,
+        10: 12,
+        11: 14,
+        12: 22,
     }
     for col_index, width in widths.items():
         sheet.column_dimensions[get_column_letter(col_index)].width = width

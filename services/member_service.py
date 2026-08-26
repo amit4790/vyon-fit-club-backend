@@ -49,8 +49,30 @@ class MemberService:
         self.db = db
         self.repository = MemberRepository(db)
 
-    def list_members(self, *, page: int, page_size: int, search: str | None) -> tuple[list[Member], int]:
-        return self.repository.list_members(page=page, page_size=page_size, search=search)
+    def list_members(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        search: str | None,
+        membership_status: str | None = None,
+    ) -> tuple[list[Member], int]:
+        if not membership_status:
+            return self.repository.list_members(page=page, page_size=page_size, search=search)
+
+        from services.member_export_service import MEMBERSHIP_STATUS_FILTERS, MemberExportService
+
+        status_label = MEMBERSHIP_STATUS_FILTERS.get(membership_status)
+        if status_label is None:
+            raise ValueError("Invalid membership status filter")
+
+        rows = MemberExportService(self.db).build_rows_for_search(search)
+        # Preserve created_at desc order from list_members_matching_search / non-deleted listing.
+        filtered_ids = [row.member_id for row in rows if row.status == status_label]
+        total_items = len(filtered_ids)
+        start = (page - 1) * page_size
+        page_ids = filtered_ids[start : start + page_size]
+        return self.repository.list_members_by_ids(page_ids), total_items
 
     @staticmethod
     def _normalize_device_user_id(device_user_id: str | None) -> str | None:

@@ -62,6 +62,28 @@ class MemberRepository:
 
         return members, total_items
 
+    def list_members_matching_search(self, search: str | None) -> list[Member]:
+        query: Select[tuple[Member]] = select(Member).where(Member.deleted_at.is_(None))
+        search_filter = member_search_filter(search)
+        if search_filter is not None:
+            query = query.where(search_filter)
+        return list(
+            self.db.execute(query.order_by(Member.created_at.desc(), Member.id.desc())).scalars().all()
+        )
+
+    def list_members_by_ids(self, member_ids: list[int]) -> list[Member]:
+        if not member_ids:
+            return []
+        members = list(
+            self.db.execute(
+                select(Member).where(Member.id.in_(member_ids), Member.deleted_at.is_(None))
+            )
+            .scalars()
+            .all()
+        )
+        by_id = {member.id: member for member in members}
+        return [by_id[member_id] for member_id in member_ids if member_id in by_id]
+
     def list_non_deleted_members(self) -> list[Member]:
         statement = select(Member).where(Member.deleted_at.is_(None)).order_by(Member.id.asc())
         return list(self.db.execute(statement).scalars().all())
