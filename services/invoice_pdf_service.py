@@ -69,6 +69,7 @@ DEFAULT_RULES_AND_REGULATIONS: list[str] = [
     "Membership can be paused only in approved cases with valid supporting documents.",
     "Discounted or complimentary months cannot be paused, carried forward, or converted to cash.",
     "The management reserves the right to modify or update these terms and conditions as needed.",
+    "Liability Disclaimer: By paying this invoice or utilizing our facilities, the client acknowledges the inherent risks of physical activity and agrees that Vyon Fit Club is not liable for any personal injuries, accidents, or health complications sustained on the premises.",
 ]
 
 

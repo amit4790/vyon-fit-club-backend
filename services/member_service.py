@@ -3,7 +3,7 @@ Member service layer for member management business logic.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -56,19 +56,29 @@ class MemberService:
         page_size: int,
         search: str | None,
         membership_status: str | None = None,
+        sort: str | None = None,
     ) -> tuple[list[Member], int]:
-        if not membership_status:
+        normalized_sort = (sort or "").strip().lower() or None
+        if normalized_sort and normalized_sort not in {"expiry"}:
+            raise ValueError("Invalid sort option")
+
+        if not membership_status and not normalized_sort:
             return self.repository.list_members(page=page, page_size=page_size, search=search)
 
         from services.member_export_service import MEMBERSHIP_STATUS_FILTERS, MemberExportService
 
-        status_label = MEMBERSHIP_STATUS_FILTERS.get(membership_status)
-        if status_label is None:
-            raise ValueError("Invalid membership status filter")
-
         rows = MemberExportService(self.db).build_rows_for_search(search)
-        # Preserve created_at desc order from list_members_matching_search / non-deleted listing.
-        filtered_ids = [row.member_id for row in rows if row.status == status_label]
+
+        if membership_status:
+            status_label = MEMBERSHIP_STATUS_FILTERS.get(membership_status)
+            if status_label is None:
+                raise ValueError("Invalid membership status filter")
+            rows = [row for row in rows if row.status == status_label]
+
+        if normalized_sort == "expiry":
+            rows.sort(key=lambda row: (row.end_date is None, row.end_date or date.max, row.member_id))
+
+        filtered_ids = [row.member_id for row in rows]
         total_items = len(filtered_ids)
         start = (page - 1) * page_size
         page_ids = filtered_ids[start : start + page_size]

@@ -29,13 +29,14 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, Body, status as http_status
 from sqlalchemy.orm import Session
 
-from database import get_db
+from database import SessionLocal, get_db
 from dependencies import require_admin_access, require_super_admin
 from models import CommandStatus, DeviceCommand
 from services.push_device_service import (
     DeviceNotRegisteredError,
     MemberSyncNotFoundError,
     PushDeviceService,
+    device_poll_cache,
 )
 from core.config import settings
 
@@ -47,63 +48,51 @@ router = APIRouter(prefix="/iclock", tags=["Device PUSH Protocol"])
 async def device_heartbeat(
     request: Request,
     SN: str = Query(..., description="Device serial number"),
-    db: Session = Depends(get_db)
 ):
     """
     Device heartbeat and information endpoint.
-    
-    The device periodically calls this endpoint to:
-    - Register itself with the server
-    - Provide device information
-    - Check server availability
-    
-    Query Parameters:
-    - SN: Device serial number (required)
-    - options: Device options/capabilities (optional)
-    - pushver: PUSH protocol version (optional)
-    - language: Device language (optional)
-    
-    Response:
-    - "OK" to acknowledge heartbeat
-    - Additional server commands/config can be returned (future)
-    
-    Example Request:
-    GET /iclock/cdata?SN=ZAM230001234&options=...&pushver=2.0
-    
-    Example Response:
-    OK
+
+    Presence writes are throttled so frequent heartbeats do not keep Neon awake.
+    Transient heartbeat params (options/pushver/language) do not force a DB hit
+    when the device is already known and identity metadata is unchanged.
     """
-    service = PushDeviceService(db)
-    
-    # Extract device info from query parameters
     query_params = dict(request.query_params)
     device_info = {
-        'options': query_params.get('options'),
-        'pushver': query_params.get('pushver'),
-        'language': query_params.get('language'),
-        'platform': query_params.get('platform'),
-        'firmware_version': query_params.get('FWVersion'),
-        'device_type': query_params.get('DeviceType'),
-        'device_name': query_params.get('DeviceName'),
+        "options": query_params.get("options"),
+        "pushver": query_params.get("pushver"),
+        "language": query_params.get("language"),
+        "platform": query_params.get("platform"),
+        "firmware_version": query_params.get("FWVersion"),
+        "device_type": query_params.get("DeviceType"),
+        "device_name": query_params.get("DeviceName"),
     }
-    
-    # Remove None values
     device_info = {k: v for k, v in device_info.items() if v is not None}
-    
-    # Register or update device
-    device = service.register_or_update_device(SN, device_info)
-    
+
+    if device_poll_cache.can_skip_heartbeat_db(
+        SN,
+        device_info,
+        interval_seconds=settings.device_presence_write_interval_seconds,
+    ):
+        logger.debug(
+            f"Device heartbeat skipped DB: {SN}",
+            extra={"device_serial": SN, "endpoint": "GET /iclock/cdata"},
+        )
+        return Response(content="OK", media_type="text/plain")
+
+    db = SessionLocal()
+    try:
+        PushDeviceService(db).register_or_update_device(SN, device_info or None)
+    finally:
+        db.close()
+
     logger.info(
         f"Device heartbeat: {SN}",
         extra={
             "device_serial": SN,
             "device_info": device_info,
-            "endpoint": "GET /iclock/cdata"
-        }
+            "endpoint": "GET /iclock/cdata",
+        },
     )
-    
-    # Return OK to acknowledge heartbeat
-    # Future: Could return server time, configuration, etc.
     return Response(content="OK", media_type="text/plain")
 
 
@@ -111,79 +100,60 @@ async def device_heartbeat(
 async def get_device_command(
     request: Request,
     SN: str = Query(..., description="Device serial number"),
-    db: Session = Depends(get_db)
 ):
     """
     Command polling endpoint.
-    
-    The device periodically polls this endpoint to check for pending commands.
-    Server returns one command at a time, marking it as executing.
-    
-    Query Parameters:
-    - SN: Device serial number (required)
-    
-    Response:
-    - "OK" if no commands pending
-    - Command string in iClock format if command exists
-    
-    Command Format:
-    C:<id>:<COMMAND_TYPE> <command_data>
-    
-    Examples:
-    C:295:DATA user pin=123\tname=John Doe\tpri=0\tpasswd=\tcard=\tgrp=1
-    C:296:DATA DELETE user pin=456
-    
-    Example Request:
-    GET /iclock/getrequest?SN=ZAM230001234
-    
-    Example Response (no commands):
-    OK
-    
-    Example Response (command pending):
-    C:295:DATA user pin=123\tname=John Doe\tpri=0\tpasswd=\tcard=\tgrp=1
-    """
-    service = PushDeviceService(db)
-    
-    # Update device last_seen
-    service.register_or_update_device(SN)
 
-    # Get next pending command from the durable queue
-    command = service.get_pending_command(SN)
-    
-    if command:
-        # Log the exact command string being sent to device
-        logger.info(
-            f"Command dispatched to device {SN}\n"
-            f"  Command ID: {command.command_id}\n"
-            f"  Command String: {command.command}",
-            extra={
-                "device_serial": SN,
-                "command_id": command.command_id,
-                "command": command.command,
-                "endpoint": "GET /iclock/getrequest"
-            }
-        )
-        
-        # Print to console for debugging
-        print("\n" + "="*80)
-        print("COMMAND SENT TO DEVICE")
-        print("="*80)
-        print(f"Device SN: {SN}")
-        print(f"Command ID: {command.command_id}")
-        print(f"Command String: {command.command}")
-        print(f"Command Length: {len(command.command)} bytes")
-        print("="*80 + "\n")
-        
-        return Response(content=command.command, media_type="text/plain")
-    else:
+    Empty polls are answered from an in-memory skip window so Neon is not queried
+    on every device tick. Queuing a command clears that window immediately.
+    """
+    if device_poll_cache.should_skip_empty_poll_db(SN):
         logger.debug(
-            f"No pending commands for device {SN}",
-            extra={
-                "device_serial": SN,
-                "endpoint": "GET /iclock/getrequest"
-            }
+            f"Empty-poll cache hit for device {SN}",
+            extra={"device_serial": SN, "endpoint": "GET /iclock/getrequest"},
         )
         return Response(content="OK", media_type="text/plain")
+
+    db = SessionLocal()
+    try:
+        service = PushDeviceService(db)
+        service.register_or_update_device(SN)
+        command = service.get_pending_command(SN)
+
+        if command:
+            device_poll_cache.mark_command_queued(SN)
+            logger.info(
+                f"Command dispatched to device {SN}\n"
+                f"  Command ID: {command.command_id}\n"
+                f"  Command String: {command.command}",
+                extra={
+                    "device_serial": SN,
+                    "command_id": command.command_id,
+                    "command": command.command,
+                    "endpoint": "GET /iclock/getrequest",
+                },
+            )
+            print("\n" + "=" * 80)
+            print("COMMAND SENT TO DEVICE")
+            print("=" * 80)
+            print(f"Device SN: {SN}")
+            print(f"Command ID: {command.command_id}")
+            print(f"Command String: {command.command}")
+            print(f"Command Length: {len(command.command)} bytes")
+            print("=" * 80 + "\n")
+            return Response(content=command.command, media_type="text/plain")
+
+        device_poll_cache.mark_empty_poll(
+            SN,
+            skip_seconds=settings.device_empty_poll_skip_seconds,
+        )
+        logger.debug(
+            f"No pending commands for device {SN}",
+            extra={"device_serial": SN, "endpoint": "GET /iclock/getrequest"},
+        )
+        return Response(content="OK", media_type="text/plain")
+    finally:
+        db.close()
 
 
 @router.post("/devicecmd")
@@ -226,8 +196,8 @@ async def acknowledge_device_command(
     """
     service = PushDeviceService(db)
     
-    # Update device last_seen
-    service.register_or_update_device(SN)
+    # Real device activity — always refresh presence.
+    service.register_or_update_device(SN, force_touch=True)
     
     # Read raw response body
     body_bytes = await request.body()
@@ -379,8 +349,8 @@ async def receive_attendance_data(
     """
     service = PushDeviceService(db)
     
-    # Update device last_seen
-    service.register_or_update_device(SN)
+    # Real device activity — always refresh presence.
+    service.register_or_update_device(SN, force_touch=True)
     
     table = (request.query_params.get("table") or "").strip().upper()
     body_bytes = await request.body()

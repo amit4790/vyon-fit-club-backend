@@ -418,6 +418,10 @@ def get_members(
             "active, active_pending_payment, inactive_unpaid, expired, none"
         ),
     ),
+    sort: str | None = Query(
+        None,
+        description="Sort order: expiry (soonest membership end date first). Default is newest members first.",
+    ),
     db: Session = Depends(get_db),
 ) -> MemberListResponse:
     """
@@ -430,6 +434,7 @@ def get_members(
             page_size=page_size,
             search=search,
             membership_status=membership_status,
+            sort=sort,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
@@ -582,6 +587,8 @@ def assign_member_subscription(
             start_date=payload.start_date,
             duration_value=payload.duration_value,
             duration_unit=payload.duration_unit,
+            bonus_duration_value=payload.bonus_duration_value,
+            bonus_duration_unit=payload.bonus_duration_unit,
         )
     except SubscriptionMemberNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -616,6 +623,8 @@ def change_subscription_plan(
             start_date=payload.start_date,
             duration_value=payload.duration_value,
             duration_unit=payload.duration_unit,
+            bonus_duration_value=payload.bonus_duration_value,
+            bonus_duration_unit=payload.bonus_duration_unit,
         )
     except SubscriptionLookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     # ZKTeco PUSH Protocol settings (official iClock/ADMS HTTP protocol)
     device_push_enabled: bool = True
     device_push_log_raw: bool = True  # Log complete raw payloads for debugging
+    # Throttle push_devices.last_seen writes (seconds). Cuts Neon write churn from heartbeats/polls.
+    device_presence_write_interval_seconds: int = 600
+    # After an empty command poll, skip DB for this many seconds and reply OK from memory.
+    # Longer windows let Neon autosuspend between polls (single Render instance assumed).
+    device_empty_poll_skip_seconds: int = 180
 
     # Production administrator bootstrap settings
     super_admin_email: str = "admin@vyonfitclub.com"

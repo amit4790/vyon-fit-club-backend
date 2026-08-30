@@ -21,7 +21,8 @@ Reference: ZKTeco PUSH SDK / iClock Protocol Specification
 
 import logging
 import re
-from datetime import datetime, timezone
+import threading
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
@@ -30,6 +31,144 @@ from models import PushDevice, DeviceCommand, CommandStatus, DeviceAttendanceLog
 from core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+class _DevicePollCache:
+    """
+    Process-local cache so frequent ZKTeco polls do not keep Neon awake.
+
+    Single Render instance assumed — this cache is not shared across workers.
+
+    - empty_until: after a poll finds no pending commands, skip DB until this time
+    - pending_hint: serials known to have (or just received) queued commands
+    - last_seen_written_at: when we last successfully persisted last_seen
+    - device_metadata: last successfully persisted identity fields per serial
+    """
+
+    _PERSISTED_META_KEYS = ("platform", "firmware_version", "device_type", "device_name")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._empty_until: dict[str, datetime] = {}
+        self._pending_hint: set[str] = set()
+        self._last_seen_written_at: dict[str, datetime] = {}
+        self._device_metadata: dict[str, dict[str, str | None]] = {}
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc)
+
+    @classmethod
+    def persisted_meta_from_info(cls, device_info: Optional[Dict[str, Any]]) -> dict[str, str | None]:
+        if not device_info:
+            return {}
+        return {
+            key: device_info[key]
+            for key in cls._PERSISTED_META_KEYS
+            if key in device_info and device_info[key] is not None
+        }
+
+    @classmethod
+    def persisted_meta_from_device(cls, device: "PushDevice") -> dict[str, str | None]:
+        return {
+            "platform": device.platform,
+            "firmware_version": device.firmware_version,
+            "device_type": device.device_type,
+            "device_name": device.device_name,
+        }
+
+    def mark_command_queued(self, serial_number: str) -> None:
+        key = serial_number.strip()
+        with self._lock:
+            self._pending_hint.add(key)
+            self._empty_until.pop(key, None)
+
+    def mark_empty_poll(self, serial_number: str, *, skip_seconds: int) -> None:
+        key = serial_number.strip()
+        with self._lock:
+            self._pending_hint.discard(key)
+            self._empty_until[key] = self._now() + timedelta(seconds=max(skip_seconds, 1))
+
+    def should_skip_empty_poll_db(self, serial_number: str) -> bool:
+        key = serial_number.strip()
+        with self._lock:
+            if key in self._pending_hint:
+                return False
+            until = self._empty_until.get(key)
+            if until is None:
+                return False
+            if self._now() >= until:
+                self._empty_until.pop(key, None)
+                return False
+            return True
+
+    def is_within_last_seen_interval(self, serial_number: str, *, interval_seconds: int) -> bool:
+        key = serial_number.strip()
+        with self._lock:
+            previous = self._last_seen_written_at.get(key)
+            if previous is None:
+                return False
+            return (self._now() - previous) < timedelta(seconds=max(interval_seconds, 1))
+
+    def needs_last_seen_write(self, serial_number: str, *, interval_seconds: int) -> bool:
+        """Peek only — does not mutate cache. Safe to call before a DB commit."""
+        return not self.is_within_last_seen_interval(
+            serial_number,
+            interval_seconds=interval_seconds,
+        )
+
+    def can_skip_heartbeat_db(
+        self,
+        serial_number: str,
+        device_info: Optional[Dict[str, Any]],
+        *,
+        interval_seconds: int,
+    ) -> bool:
+        """
+        True when Neon must not be opened for this heartbeat.
+
+        Requires a prior successful persist for this SN, an unexpired last_seen
+        throttle window, and no change to persisted identity metadata.
+        Transient query params (options/pushver/language) are ignored.
+        """
+        key = serial_number.strip()
+        incoming = self.persisted_meta_from_info(device_info)
+        with self._lock:
+            previous = self._last_seen_written_at.get(key)
+            if previous is None:
+                return False
+            if (self._now() - previous) >= timedelta(seconds=max(interval_seconds, 1)):
+                return False
+            if key not in self._device_metadata:
+                return False
+            cached = self._device_metadata[key]
+            for meta_key, value in incoming.items():
+                if cached.get(meta_key) != value:
+                    return False
+            return True
+
+    def note_device_persisted(
+        self,
+        serial_number: str,
+        metadata: Optional[Dict[str, str | None]] = None,
+    ) -> None:
+        """Record a successful DB persist. Call only after commit succeeds."""
+        key = serial_number.strip()
+        with self._lock:
+            self._last_seen_written_at[key] = self._now()
+            if metadata is not None:
+                merged = dict(self._device_metadata.get(key, {}))
+                merged.update(metadata)
+                self._device_metadata[key] = merged
+
+    def clear_last_seen_stamp(self, serial_number: str) -> None:
+        """Test helper / recovery: allow last_seen write to be retried."""
+        key = serial_number.strip()
+        with self._lock:
+            self._last_seen_written_at.pop(key, None)
+
+
+device_poll_cache = _DevicePollCache()
 
 
 class PushDeviceService:
@@ -41,68 +180,91 @@ class PushDeviceService:
     def register_or_update_device(
         self,
         serial_number: str,
-        device_info: Optional[Dict[str, Any]] = None
+        device_info: Optional[Dict[str, Any]] = None,
+        *,
+        force_touch: bool = False,
     ) -> PushDevice:
         """
-        Register a new device or update existing device's last_seen timestamp.
+        Register a new device or (throttled) update last_seen.
 
-        Called when device makes any request to the server.
-
-        Args:
-            serial_number: Device serial number (from SN parameter)
-            device_info: Optional metadata from device (platform, firmware, etc.)
-
-        Returns:
-            PushDevice instance
+        Existing devices only persist last_seen when force_touch is True or the
+        write interval has elapsed. In-memory throttle stamps update only after
+        a successful commit so failed writes remain retryable.
         """
         device = self.db.query(PushDevice).filter(
             PushDevice.serial_number == serial_number
         ).first()
 
-        if device:
-            # Update last_seen for existing device
-            device.last_seen = datetime.utcnow()
-            
-            # Update metadata if provided
-            if device_info:
-                if 'platform' in device_info:
-                    device.platform = device_info['platform']
-                if 'firmware_version' in device_info:
-                    device.firmware_version = device_info['firmware_version']
-                if 'device_type' in device_info:
-                    device.device_type = device_info['device_type']
-                if 'device_name' in device_info:
-                    device.device_name = device_info['device_name']
-            
-            logger.info(
-                f"Device heartbeat: {serial_number}",
-                extra={
-                    "device_serial": serial_number,
-                    "last_seen": device.last_seen.isoformat()
-                }
-            )
-        else:
-            # Register new device
-            device = PushDevice(
-                serial_number=serial_number,
-                device_name=device_info.get('device_name') if device_info else None,
-                platform=device_info.get('platform') if device_info else None,
-                firmware_version=device_info.get('firmware_version') if device_info else None,
-                device_type=device_info.get('device_type') if device_info else None,
-                registration_payload=str(device_info) if device_info else None,
-            )
-            self.db.add(device)
-            
-            logger.info(
-                f"Device registered: {serial_number}",
-                extra={
-                    "device_serial": serial_number,
-                    "device_info": device_info
-                }
-            )
+        write_interval = settings.device_presence_write_interval_seconds
 
-        self.db.commit()
-        self.db.refresh(device)
+        if device:
+            should_touch = force_touch or device_poll_cache.needs_last_seen_write(
+                serial_number,
+                interval_seconds=write_interval,
+            )
+            metadata_changed = False
+            if device_info:
+                if "platform" in device_info and device.platform != device_info["platform"]:
+                    device.platform = device_info["platform"]
+                    metadata_changed = True
+                if (
+                    "firmware_version" in device_info
+                    and device.firmware_version != device_info["firmware_version"]
+                ):
+                    device.firmware_version = device_info["firmware_version"]
+                    metadata_changed = True
+                if "device_type" in device_info and device.device_type != device_info["device_type"]:
+                    device.device_type = device_info["device_type"]
+                    metadata_changed = True
+                if "device_name" in device_info and device.device_name != device_info["device_name"]:
+                    device.device_name = device_info["device_name"]
+                    metadata_changed = True
+
+            if should_touch or metadata_changed:
+                device.last_seen = datetime.utcnow()
+                try:
+                    self.db.commit()
+                    self.db.refresh(device)
+                except Exception:
+                    self.db.rollback()
+                    raise
+                device_poll_cache.note_device_persisted(
+                    serial_number,
+                    _DevicePollCache.persisted_meta_from_device(device),
+                )
+                logger.debug(
+                    f"Device presence persisted: {serial_number}",
+                    extra={
+                        "device_serial": serial_number,
+                        "last_seen": device.last_seen.isoformat() if device.last_seen else None,
+                        "metadata_changed": metadata_changed,
+                    },
+                )
+            return device
+
+        device = PushDevice(
+            serial_number=serial_number,
+            device_name=device_info.get("device_name") if device_info else None,
+            platform=device_info.get("platform") if device_info else None,
+            firmware_version=device_info.get("firmware_version") if device_info else None,
+            device_type=device_info.get("device_type") if device_info else None,
+            registration_payload=str(device_info) if device_info else None,
+        )
+        self.db.add(device)
+        try:
+            self.db.commit()
+            self.db.refresh(device)
+        except Exception:
+            self.db.rollback()
+            raise
+        device_poll_cache.note_device_persisted(
+            serial_number,
+            _DevicePollCache.persisted_meta_from_device(device),
+        )
+        logger.info(
+            f"Device registered: {serial_number}",
+            extra={"device_serial": serial_number, "device_info": device_info},
+        )
         return device
 
     def get_pending_command(self, device_serial: str) -> Optional[DeviceCommand]:
@@ -265,6 +427,8 @@ class PushDeviceService:
             self.db.refresh(device_command)
         else:
             self.db.flush()
+
+        device_poll_cache.mark_command_queued(device_serial)
 
         logger.info(
             f"Command queued: {command_id} for device {device_serial}",

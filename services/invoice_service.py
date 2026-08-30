@@ -70,6 +70,26 @@ class InvoiceService:
         return f"{duration_value} {unit_label}"
 
     def _resolve_subscription_duration_label(self, subscription) -> str:
+        stored_label = getattr(subscription, "duration_label", None)
+        if stored_label:
+            return stored_label
+
+        duration_value = getattr(subscription, "duration_value", None)
+        duration_unit = getattr(subscription, "duration_unit", None)
+        if duration_value and duration_unit:
+            bonus_value = getattr(subscription, "bonus_duration_value", None)
+            bonus_unit = getattr(subscription, "bonus_duration_unit", None)
+            paid_label = self._format_duration_label(duration_value, duration_unit)
+            if bonus_value and bonus_value > 0 and bonus_unit:
+                if duration_unit == bonus_unit:
+                    if duration_unit == "months":
+                        unit_label = "Month" if duration_value == 1 and bonus_value == 1 else "Months"
+                    else:
+                        unit_label = "Day" if duration_value == 1 and bonus_value == 1 else "Days"
+                    return f"{duration_value} + {bonus_value} {unit_label}"
+                return f"{paid_label} + {self._format_duration_label(bonus_value, bonus_unit)}"
+            return paid_label
+
         plan = subscription.plan
         if not plan:
             total_days = max((subscription.end_date - subscription.start_date).days + 1, 1)

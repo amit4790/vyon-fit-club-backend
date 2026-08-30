@@ -74,12 +74,75 @@ class SubscriptionService:
         )
         return f"{duration_value} {unit_label}"
 
+    @classmethod
+    def _format_combined_duration_label(
+        cls,
+        duration_value: int,
+        duration_unit: str,
+        bonus_duration_value: int | None = None,
+        bonus_duration_unit: str | None = None,
+    ) -> str:
+        paid_label = cls._format_duration_label(duration_value, duration_unit)
+        if not bonus_duration_value or bonus_duration_value <= 0 or not bonus_duration_unit:
+            return paid_label
+        if duration_unit == bonus_duration_unit:
+            if duration_unit == "months":
+                unit_label = "Month" if duration_value == 1 and bonus_duration_value == 1 else "Months"
+            else:
+                unit_label = "Day" if duration_value == 1 and bonus_duration_value == 1 else "Days"
+            return f"{duration_value} + {bonus_duration_value} {unit_label}"
+        bonus_label = cls._format_duration_label(bonus_duration_value, bonus_duration_unit)
+        return f"{paid_label} + {bonus_label}"
+
     def _calculate_end_date(self, *, start_date: date, duration_value: int, duration_unit: str) -> date:
         if duration_unit == "months":
             return self._add_months(start_date, duration_value) - timedelta(days=1)
         return start_date + timedelta(days=duration_value - 1)
 
+    def _calculate_end_date_with_bonus(
+        self,
+        *,
+        start_date: date,
+        duration_value: int,
+        duration_unit: str,
+        bonus_duration_value: int | None = None,
+        bonus_duration_unit: str | None = None,
+    ) -> date:
+        paid_end = self._calculate_end_date(
+            start_date=start_date,
+            duration_value=duration_value,
+            duration_unit=duration_unit,
+        )
+        if not bonus_duration_value or bonus_duration_value <= 0 or not bonus_duration_unit:
+            return paid_end
+        bonus_start = paid_end + timedelta(days=1)
+        return self._calculate_end_date(
+            start_date=bonus_start,
+            duration_value=bonus_duration_value,
+            duration_unit=bonus_duration_unit,
+        )
+
+    @staticmethod
+    def _normalize_bonus(
+        bonus_duration_value: int | None,
+        bonus_duration_unit: str | None,
+    ) -> tuple[int | None, str | None]:
+        if bonus_duration_value is None or bonus_duration_value <= 0 or not bonus_duration_unit:
+            return None, None
+        return bonus_duration_value, bonus_duration_unit
+
     def _resolve_duration_label(self, row: MembershipSubscription) -> str:
+        if row.duration_label:
+            return row.duration_label
+
+        if row.duration_value and row.duration_unit:
+            return self._format_combined_duration_label(
+                row.duration_value,
+                row.duration_unit,
+                row.bonus_duration_value,
+                row.bonus_duration_unit,
+            )
+
         if row.plan is None:
             total_days = (row.end_date - row.start_date).days + 1
             return self._format_duration_label(max(total_days, 1), "days")
@@ -199,6 +262,8 @@ class SubscriptionService:
         start_date: date,
         duration_value: int | None = None,
         duration_unit: str | None = None,
+        bonus_duration_value: int | None = None,
+        bonus_duration_unit: str | None = None,
     ) -> tuple[SubscriptionResponse, list[dict]]:
         member = self.repo.get_member_by_id(member_id)
         if not member:
@@ -216,10 +281,22 @@ class SubscriptionService:
 
         effective_duration_value = duration_value if duration_value is not None else plan.duration_months
         effective_duration_unit = duration_unit if duration_unit is not None else "months"
-        end_date = self._calculate_end_date(
+        effective_bonus_value, effective_bonus_unit = self._normalize_bonus(
+            bonus_duration_value,
+            bonus_duration_unit,
+        )
+        duration_label = self._format_combined_duration_label(
+            effective_duration_value,
+            effective_duration_unit,
+            effective_bonus_value,
+            effective_bonus_unit,
+        )
+        end_date = self._calculate_end_date_with_bonus(
             start_date=start_date,
             duration_value=effective_duration_value,
             duration_unit=effective_duration_unit,
+            bonus_duration_value=effective_bonus_value,
+            bonus_duration_unit=effective_bonus_unit,
         )
 
         row = MembershipSubscription(
@@ -227,6 +304,11 @@ class SubscriptionService:
             plan_id=plan.id,
             start_date=start_date,
             end_date=end_date,
+            duration_value=effective_duration_value,
+            duration_unit=effective_duration_unit,
+            bonus_duration_value=effective_bonus_value,
+            bonus_duration_unit=effective_bonus_unit,
+            duration_label=duration_label,
             status="active",
             payment_status="pending",
             base_price=float(base_price),
@@ -271,10 +353,7 @@ class SubscriptionService:
         )
 
         notifications = [asdict(item) for item in [*welcome_results, *invoice_results]]
-        return self._to_subscription_response(
-            row,
-            duration_label_override=self._format_duration_label(effective_duration_value, effective_duration_unit),
-        ), notifications
+        return self._to_subscription_response(row, duration_label_override=duration_label), notifications
 
     def change_subscription_plan(
         self,
@@ -283,6 +362,8 @@ class SubscriptionService:
         start_date: date | None = None,
         duration_value: int | None = None,
         duration_unit: str | None = None,
+        bonus_duration_value: int | None = None,
+        bonus_duration_unit: str | None = None,
     ) -> SubscriptionResponse:
         """Update an existing subscription to a different membership plan."""
         row = self.repo.get_subscription_by_id(subscription_id)
@@ -300,10 +381,22 @@ class SubscriptionService:
 
         effective_duration_value = duration_value if duration_value is not None else plan.duration_months
         effective_duration_unit = duration_unit if duration_unit is not None else "months"
-        end_date = self._calculate_end_date(
+        effective_bonus_value, effective_bonus_unit = self._normalize_bonus(
+            bonus_duration_value,
+            bonus_duration_unit,
+        )
+        duration_label = self._format_combined_duration_label(
+            effective_duration_value,
+            effective_duration_unit,
+            effective_bonus_value,
+            effective_bonus_unit,
+        )
+        end_date = self._calculate_end_date_with_bonus(
             start_date=effective_start,
             duration_value=effective_duration_value,
             duration_unit=effective_duration_unit,
+            bonus_duration_value=effective_bonus_value,
+            bonus_duration_unit=effective_bonus_unit,
         )
 
         base_price = self._to_money(plan.base_price)
@@ -314,6 +407,11 @@ class SubscriptionService:
         row.plan_id = plan.id
         row.start_date = effective_start
         row.end_date = end_date
+        row.duration_value = effective_duration_value
+        row.duration_unit = effective_duration_unit
+        row.bonus_duration_value = effective_bonus_value
+        row.bonus_duration_unit = effective_bonus_unit
+        row.duration_label = duration_label
         row.base_price = float(base_price)
         row.tax_percent = float(tax_percent)
         row.tax_amount = float(tax_amount)
@@ -353,10 +451,7 @@ class SubscriptionService:
             self.db.rollback()
             raise
 
-        return self._to_subscription_response(
-            row,
-            duration_label_override=self._format_duration_label(effective_duration_value, effective_duration_unit),
-        )
+        return self._to_subscription_response(row, duration_label_override=duration_label)
 
     def get_member_subscriptions(self, member_id: int) -> list[SubscriptionResponse]:
         member = self.repo.get_member_by_id(member_id)
@@ -398,6 +493,10 @@ class SubscriptionService:
             plan_variant=plan.variant_name,
             plan_label=plan.name,
             duration_label=duration_label,
+            duration_value=row.duration_value,
+            duration_unit=row.duration_unit,
+            bonus_duration_value=row.bonus_duration_value,
+            bonus_duration_unit=row.bonus_duration_unit,
             start_date=row.start_date,
             end_date=row.end_date,
             status=row.status,

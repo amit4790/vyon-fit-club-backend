@@ -48,11 +48,17 @@ class AssignSubscriptionRequest(BaseModel):
     start_date: date = Field(default_factory=date.today)
     duration_value: int | None = Field(default=None, gt=0)
     duration_unit: Literal["months", "days"] | None = None
+    bonus_duration_value: int | None = Field(default=None, ge=0)
+    bonus_duration_unit: Literal["months", "days"] | None = None
 
     @model_validator(mode="after")
     def validate_duration_fields(self) -> "AssignSubscriptionRequest":
         if (self.duration_value is None) != (self.duration_unit is None):
             raise ValueError("Duration value and unit must be provided together")
+        if self.bonus_duration_value is None and self.bonus_duration_unit is None:
+            return self
+        if self.bonus_duration_value is None or self.bonus_duration_unit is None:
+            raise ValueError("Bonus duration value and unit must be provided together")
         return self
 
 
@@ -61,12 +67,19 @@ class ChangeSubscriptionPlanRequest(BaseModel):
     start_date: date | None = None
     duration_value: int | None = Field(default=None, gt=0)
     duration_unit: Literal["months", "days"] | None = None
+    bonus_duration_value: int | None = Field(default=None, ge=0)
+    bonus_duration_unit: Literal["months", "days"] | None = None
 
     @model_validator(mode="after")
     def validate_duration_fields(self) -> "ChangeSubscriptionPlanRequest":
         if (self.duration_value is None) != (self.duration_unit is None):
             raise ValueError("Duration value and unit must be provided together")
+        if self.bonus_duration_value is None and self.bonus_duration_unit is None:
+            return self
+        if self.bonus_duration_value is None or self.bonus_duration_unit is None:
+            raise ValueError("Bonus duration value and unit must be provided together")
         return self
+
 
 class SubscriptionResponse(BaseModel):
     id: int
@@ -77,6 +90,10 @@ class SubscriptionResponse(BaseModel):
     plan_variant: str | None
     plan_label: str
     duration_label: str
+    duration_value: int | None = None
+    duration_unit: str | None = None
+    bonus_duration_value: int | None = None
+    bonus_duration_unit: str | None = None
     start_date: date
     end_date: date
     status: str
