@@ -374,7 +374,7 @@ async def receive_attendance_data(
     content_length = request.headers.get('content-length')
     content_length_int = int(content_length) if content_length else len(body_bytes)
     
-    # Persist raw upload (ATTLOG, USERINFO, and other tables)
+    # Persist non-empty uploads only (empty OPERLOG/ATTLOG is common and noisy).
     attendance_log = service.log_device_table_upload(
         device_serial=SN,
         raw_payload=raw_payload,
@@ -382,6 +382,19 @@ async def receive_attendance_data(
         content_type=content_type,
         content_length=content_length_int
     )
+
+    if attendance_log is None:
+        logger.info(
+            f"Device table data received (empty, not stored): table={table or 'UNKNOWN'} from device {SN}",
+            extra={
+                "device_serial": SN,
+                "table": table or None,
+                "record_count": 0,
+                "payload_size": content_length_int,
+                "endpoint": "POST /iclock/cdata",
+            },
+        )
+        return Response(content="OK", media_type="text/plain")
 
     if table == "ATTLOG" and raw_payload.strip():
         try:

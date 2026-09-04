@@ -447,7 +447,7 @@ class PushDeviceService:
         raw_payload: str,
         content_type: Optional[str] = None,
         content_length: Optional[int] = None
-    ) -> DeviceAttendanceLog:
+    ) -> Optional[DeviceAttendanceLog]:
         """Log raw ATTLOG upload. Prefer log_device_table_upload for multi-table support."""
         return self.log_device_table_upload(
             device_serial=device_serial,
@@ -464,15 +464,38 @@ class PushDeviceService:
         table_name: Optional[str] = None,
         content_type: Optional[str] = None,
         content_length: Optional[int] = None
-    ) -> DeviceAttendanceLog:
+    ) -> Optional[DeviceAttendanceLog]:
         """
         Log raw device table upload (ATTLOG, USERINFO, BIODATA, OPERLOG, ...).
 
         Called when device posts to POST /iclock/cdata.
         Stores complete raw payload for analysis and future parsing.
+
+        Empty blank/whitespace uploads are acknowledged by the route without
+        writing device_attendance_logs — ZKTeco devices frequently POST empty
+        OPERLOG/ATTLOG bodies that would otherwise dominate Neon write volume.
+
+        Emptiness is detected with ``not raw_payload.strip()`` only — never with
+        ``record_count == 0`` alone. Bare ATTLOG lines without an ``ATTLOG:``
+        prefix can under-count depending on the counter, but still contain punches.
         """
         normalized_table = (table_name or "").strip().upper()
         record_count = self._count_table_records(raw_payload, normalized_table)
+
+        # Skip persistence only for blank payloads. Do not use record_count alone —
+        # ATTLOG rows may omit the "ATTLOG:" prefix and still contain punches.
+        if not raw_payload.strip():
+            logger.info(
+                f"Device table upload skipped (empty): table={normalized_table or 'UNKNOWN'} "
+                f"from device {device_serial}",
+                extra={
+                    "device_serial": device_serial,
+                    "table": normalized_table or None,
+                    "record_count": 0,
+                    "payload_size": len(raw_payload),
+                },
+            )
+            return None
 
         attendance_log = DeviceAttendanceLog(
             device_serial=device_serial,
@@ -508,7 +531,13 @@ class PushDeviceService:
             return 0
 
         if table_name == "ATTLOG":
-            return raw_payload.count("\nATTLOG:") + (1 if raw_payload.startswith("ATTLOG:") else 0)
+            # Devices may send "ATTLOG:pin\t..." or bare "pin\t..." lines.
+            prefixed = raw_payload.count("\nATTLOG:") + (
+                1 if raw_payload.lstrip().startswith("ATTLOG:") else 0
+            )
+            if prefixed:
+                return prefixed
+            return sum(1 for line in raw_payload.splitlines() if line.strip())
 
         if table_name == "USERINFO":
             # USERINFO rows are typically newline-separated; count non-empty lines.

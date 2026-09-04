@@ -15,9 +15,15 @@ def resolve_device_pin(pin: int) -> tuple[str, int] | None:
     """
     Map a device PIN to (person_type, person_id).
 
+    Convention (unchanged): trainer PIN = TRAINER_PIN_OFFSET + trainer_id
+    (i.e. PIN > 50000 for valid trainers; PIN 50000 is not a valid trainer).
+
     Returns:
-        ("trainer", trainer_id) when pin >= TRAINER_PIN_OFFSET
-        ("member", member_id) otherwise
+        ("trainer", trainer_id) when pin > TRAINER_PIN_OFFSET (pin >= 50001)
+        ("member", member_id) when 0 < pin <= TRAINER_PIN_OFFSET
+        None for invalid pins
+
+    Attendance ingest ignores member mappings; only trainers are punched.
     """
     try:
         value = int(pin)
