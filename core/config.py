@@ -55,6 +55,15 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 1440
 
+    # Mobile OTP / PIN auth
+    mobile_otp_ttl_seconds: int = 300
+    mobile_otp_session_ttl_minutes: int = 10
+    mobile_otp_max_verify_attempts: int = 5
+    mobile_pin_min_length: int = 4
+    mobile_pin_max_length: int = 6
+    mobile_pin_max_failed_attempts: int = 5
+    mobile_pin_lockout_minutes: int = 15
+
     _generated_jwt_secret: str | None = None
 
     class Config:

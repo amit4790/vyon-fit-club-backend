@@ -1,54 +1,45 @@
 """
-Trainer routes for VYON FIT CLUB.
-Handles trainer-specific endpoints.
+Authenticated trainer mobile routes.
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from database import get_db
+from dependencies import require_trainer_access
+from models import Member, User
+from schemas.trainer_mobile import TrainerMeData, TrainerMeResponse
+from services.auth_service import SessionPayload
 
 router = APIRouter(prefix="/api/trainer", tags=["trainer"])
 
 
-@router.get("/dashboard")
-async def get_trainer_dashboard():
-    """
-    Get trainer dashboard data.
-    """
-    return {
-        "message": "Trainer dashboard",
-        "data": {
-            "trainer_id": 1,
-            "name": "John Smith",
-            "clients": 8,
-            "classes_today": 2,
-            "upcoming_sessions": 5
-        }
-    }
+@router.get("/me", response_model=TrainerMeResponse)
+def get_trainer_me(
+    session: SessionPayload = Depends(require_trainer_access),
+    db: Session = Depends(get_db),
+) -> TrainerMeResponse:
+    user = db.execute(select(User).where(User.id == int(session.user_id))).scalar_one_or_none()
+    if not user or user.role != "TRAINER":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trainer not found")
 
+    assigned_count = db.scalar(
+        select(func.count()).select_from(Member).where(
+            Member.trainer_id == user.id,
+            Member.deleted_at.is_(None),
+        )
+    ) or 0
 
-@router.get("/clients")
-async def get_trainer_clients():
-    """
-    Get clients assigned to trainer.
-    """
-    return {
-        "message": "Trainer clients",
-        "data": [
-            {"id": 1, "name": "Alice Wilson", "session_date": "2024-01-15", "status": "confirmed"},
-            {"id": 2, "name": "Bob Johnson", "session_date": "2024-01-16", "status": "pending"},
-            {"id": 3, "name": "Carol Martinez", "session_date": "2024-01-17", "status": "confirmed"}
-        ]
-    }
-
-
-@router.get("/schedule")
-async def get_trainer_schedule():
-    """
-    Get trainer's class schedule.
-    """
-    return {
-        "message": "Trainer schedule",
-        "data": [
-            {"class_id": 1, "name": "Morning Session", "time": "6:00 AM", "capacity": 20},
-            {"class_id": 2, "name": "Evening Session", "time": "6:30 PM", "capacity": 25}
-        ]
-    }
+    return TrainerMeResponse(
+        data=TrainerMeData(
+            user_id=user.id,
+            full_name=user.full_name,
+            email=user.email,
+            phone_number=user.phone_number,
+            specialization=user.specialization,
+            assigned_member_count=int(assigned_count),
+            has_pin=bool(user.pin_hash),
+            is_active=user.is_active,
+        )
+    )

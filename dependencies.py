@@ -55,3 +55,15 @@ def require_super_admin(session: SessionPayload = Depends(get_current_session)) 
     if session.role != UserRole.SUPER_ADMIN:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
     return session
+
+
+def require_member_access(session: SessionPayload = Depends(get_current_session)) -> SessionPayload:
+    if session.role != UserRole.MEMBER:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Member access required")
+    return session
+
+
+def require_trainer_access(session: SessionPayload = Depends(get_current_session)) -> SessionPayload:
+    if session.role != UserRole.TRAINER:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Trainer access required")
+    return session

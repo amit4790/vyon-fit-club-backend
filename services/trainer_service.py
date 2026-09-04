@@ -62,7 +62,7 @@ class TrainerService:
         if existing_phone:
             raise DuplicateTrainerPhoneError("Trainer phone number already exists")
 
-        # Trainers do not log into the app; store an unusable random password hash.
+        # Trainers use mobile PIN auth for the app; keep an unusable password hash for admin email login separation.
         password = payload.temporary_password or secrets.token_urlsafe(32)
 
         trainer = User(
