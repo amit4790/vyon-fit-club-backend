@@ -392,6 +392,17 @@ class PushDeviceService:
         member.device_sync_status = "pending"
         member.last_device_sync_at = None
 
+    def _member_device_privilege(self, member_id: int) -> int:
+        """Pri=0 when member has active non-expired membership; else Pri=1 (inactive)."""
+        from datetime import date
+
+        from core.device_pins import DEVICE_PRIVILEGE_INACTIVE, DEVICE_PRIVILEGE_NORMAL
+        from repositories.subscription_repository import SubscriptionRepository
+
+        if SubscriptionRepository(self.db).member_has_active_membership(member_id, date.today()):
+            return DEVICE_PRIVILEGE_NORMAL
+        return DEVICE_PRIVILEGE_INACTIVE
+
     def queue_command(
         self,
         device_serial: str,
@@ -585,14 +596,22 @@ class PushDeviceService:
         self,
         member_id: int,
         member_name: str,
-        card_number: Optional[str] = None
+        card_number: Optional[str] = None,
+        *,
+        privilege: int = 0,
     ) -> List[DeviceCommand]:
         """
         Queue user add/update commands for all active PUSH devices.
         
         Called when a member is created or updated in VYON.
         Device PIN is the VYON member.id.
+        privilege: 0 = normal (face/access enabled), 1 = inactive (access disabled).
         """
+        from core.device_pins import DEVICE_PRIVILEGE_INACTIVE, DEVICE_PRIVILEGE_NORMAL
+
+        if privilege not in {DEVICE_PRIVILEGE_NORMAL, DEVICE_PRIVILEGE_INACTIVE}:
+            privilege = DEVICE_PRIVILEGE_NORMAL
+
         devices = self.db.query(PushDevice).filter(
             PushDevice.is_active == True
         ).all()
@@ -611,7 +630,7 @@ class PushDeviceService:
                 command_id=command_id,
                 pin=str(member_id),
                 username=member_name,
-                privilege=0,
+                privilege=privilege,
                 password="",
                 card=card_number or "",
             )
@@ -627,6 +646,71 @@ class PushDeviceService:
                 extra={
                     "member_id": member_id,
                     "device_serial": device.serial_number,
+                    "command_id": command_id,
+                    "privilege": privilege,
+                },
+            )
+
+        if commands:
+            from models import Member
+
+            member = self.db.query(Member).filter(Member.id == member_id).first()
+            if member:
+                self._mark_member_sync_pending(member)
+                self.db.commit()
+
+        return commands
+
+    def set_member_access_on_devices(
+        self,
+        member_id: int,
+        member_name: str,
+        *,
+        enabled: bool,
+    ) -> List[DeviceCommand]:
+        """
+        Enable or disable a member's device access without deleting biometrics.
+
+        Uses DATA UPDATE USERINFO with Pri=0 (normal) or Pri=1 (inactive).
+        Face templates remain on the device so renewing can re-enable quickly.
+        """
+        from core.device_pins import DEVICE_PRIVILEGE_INACTIVE, DEVICE_PRIVILEGE_NORMAL
+
+        privilege = DEVICE_PRIVILEGE_NORMAL if enabled else DEVICE_PRIVILEGE_INACTIVE
+        devices = self.db.query(PushDevice).filter(PushDevice.is_active == True).all()
+        if not devices:
+            logger.warning(
+                "No active PUSH devices found for member access update",
+                extra={"member_id": member_id, "enabled": enabled},
+            )
+            return []
+
+        commands: List[DeviceCommand] = []
+        for index, device in enumerate(devices):
+            command_id = self._next_command_id(member_id=member_id, salt=index + 900)
+            command_str = UserSyncCommand.build_update_userinfo_command(
+                command_id=command_id,
+                pin=str(member_id),
+                name=member_name,
+                privilege=privilege,
+                password="",
+            )
+            commands.append(
+                self.queue_command(
+                    device_serial=device.serial_number,
+                    command_id=str(command_id),
+                    command=command_str,
+                    max_retries=3,
+                )
+            )
+            logger.info(
+                f"Queued member access {'enable' if enabled else 'disable'} "
+                f"for member {member_id} on {device.serial_number} (Pri={privilege})",
+                extra={
+                    "member_id": member_id,
+                    "device_serial": device.serial_number,
+                    "enabled": enabled,
+                    "privilege": privilege,
                     "command_id": command_id,
                 },
             )
@@ -867,11 +951,12 @@ class PushDeviceService:
         member_name = getattr(member, "full_name", None) or getattr(member, "name", "") or ""
 
         userinfo_cmd_id = self._next_command_id(member_id=member.id, salt=salt_base)
+        privilege = self._member_device_privilege(int(member.id))
         userinfo_command = UserSyncCommand.build_update_userinfo_command(
             command_id=userinfo_cmd_id,
             pin=str(member.id),
             name=member_name,
-            privilege=0,
+            privilege=privilege,
             password=passwd,
         )
         commands.append(

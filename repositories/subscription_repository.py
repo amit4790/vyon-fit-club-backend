@@ -130,3 +130,16 @@ class SubscriptionRepository:
             MembershipSubscription.status == "active",
         )
         return self.db.execute(statement).scalars().all()
+
+    def member_has_active_membership(self, member_id: int, today: date) -> bool:
+        """True when the member has at least one non-expired active subscription."""
+        statement = (
+            select(MembershipSubscription.id)
+            .where(
+                MembershipSubscription.member_id == member_id,
+                MembershipSubscription.status == "active",
+                MembershipSubscription.end_date >= today,
+            )
+            .limit(1)
+        )
+        return self.db.execute(statement).scalar_one_or_none() is not None

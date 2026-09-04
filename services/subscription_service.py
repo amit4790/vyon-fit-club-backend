@@ -5,6 +5,7 @@ Subscription business logic and pricing calculations.
 from __future__ import annotations
 
 import json
+import logging
 from calendar import monthrange
 from dataclasses import asdict
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from sqlalchemy.orm import Session
 
+from core.config import settings
 from models import Invoice, MembershipPlan, MembershipSubscription
 from repositories.invoice_repository import InvoiceRepository
 from repositories.subscription_repository import SubscriptionRepository
@@ -22,6 +24,8 @@ from schemas.subscription import (
     SubscriptionResponse,
 )
 from services.notification_service import NotificationService
+
+logger = logging.getLogger(__name__)
 
 
 class MemberNotFoundError(Exception):
@@ -160,9 +164,39 @@ class SubscriptionService:
         if not expired:
             return
 
+        affected_member_ids = {row.member_id for row in expired}
         for row in expired:
             row.status = "expired"
         self.db.commit()
+
+        # Disable face/access on device when the member has no remaining active plan.
+        self._sync_device_access_for_members(affected_member_ids)
+
+    def _sync_device_access_for_members(self, member_ids: set[int]) -> None:
+        """Queue Pri=0/1 USERINFO updates so device access matches membership."""
+        if not member_ids or not settings.device_push_enabled:
+            return
+
+        from services.push_device_service import PushDeviceService
+
+        today = date.today()
+        push = PushDeviceService(self.db)
+        for member_id in member_ids:
+            member = self.repo.get_member_by_id(member_id)
+            if not member:
+                continue
+            enabled = self.repo.member_has_active_membership(member_id, today)
+            try:
+                push.set_member_access_on_devices(
+                    member_id,
+                    member.full_name,
+                    enabled=enabled,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to sync device access after membership change",
+                    extra={"member_id": member_id, "enabled": enabled},
+                )
 
     def get_plan_catalog(self) -> list[PlanFamilyResponse]:
         plans = self.repo.list_active_plans()
@@ -353,6 +387,8 @@ class SubscriptionService:
         )
 
         notifications = [asdict(item) for item in [*welcome_results, *invoice_results]]
+        # New active plan → re-enable face/access on biometric devices.
+        self._sync_device_access_for_members({member_id})
         return self._to_subscription_response(row, duration_label_override=duration_label), notifications
 
     def change_subscription_plan(
@@ -451,6 +487,8 @@ class SubscriptionService:
             self.db.rollback()
             raise
 
+        # Plan change / renew to active → re-enable device access when membership is valid.
+        self._sync_device_access_for_members({row.member_id})
         return self._to_subscription_response(row, duration_label_override=duration_label)
 
     def get_member_subscriptions(self, member_id: int) -> list[SubscriptionResponse]:
