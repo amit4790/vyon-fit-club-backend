@@ -319,3 +319,23 @@ class TestDeviceTimezoneIngest:
         assert rows[0].person_id == 7
         # Late vs 06:15 IST threshold — 23:30 is late.
         assert rows[0].is_late is True
+
+    def test_api_exposes_ist_offset(self, db: Session):
+        from datetime import timezone
+
+        from core.device_time import parse_device_wall_clock, to_device_local
+
+        expected_utc = parse_device_wall_clock("2026-09-04 07:02:09")
+        AttendanceService(db).ingest_attlog_payload(
+            device_serial="DEV1",
+            raw_payload="50012\t2026-09-04 07:02:09\t0\t1\t0\t0",
+        )
+        punch = db.execute(select(AttendancePunch)).scalar_one()
+        stored = punch.punched_at
+        if stored.tzinfo is None:
+            stored = stored.replace(tzinfo=timezone.utc)
+        assert stored.astimezone(timezone.utc) == expected_utc.astimezone(timezone.utc)
+
+        local = to_device_local(stored)
+        assert local.strftime("%H:%M:%S") == "07:02:09"
+        assert local.utcoffset().total_seconds() == 5.5 * 3600
