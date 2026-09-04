@@ -12,6 +12,7 @@ from datetime import date, datetime, time, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
+from core.config import settings
 from core.device_pins import resolve_device_pin
 from core.device_time import (
     gym_day_bounds_utc,
@@ -30,7 +31,8 @@ logger = logging.getLogger(__name__)
 # Gym-wide late rule for v1 (can move to business_settings later). Evaluated in device TZ.
 DEFAULT_SHIFT_START = time(6, 0)
 DEFAULT_GRACE_MINUTES = 15
-RETENTION_DAYS = 90
+# Punch export window (alias of settings for callers that import the constant).
+RETENTION_DAYS = settings.attendance_punch_retention_days
 
 _ATTLOG_LINE_RE = re.compile(
     r"^(?:ATTLOG[:\s]*)?(\d+)\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})"
@@ -268,16 +270,23 @@ class AttendanceService:
         return output.getvalue()
 
     def purge_old_records(self) -> dict[str, int]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)
-        punches_deleted = self.repo.delete_older_than(cutoff)
+        punch_days = settings.attendance_punch_retention_days
+        raw_days = settings.device_raw_log_retention_days
+        now = datetime.now(timezone.utc)
+        punch_cutoff = now - timedelta(days=punch_days)
+        raw_cutoff = now - timedelta(days=raw_days)
+
+        punches_deleted = self.repo.delete_older_than(punch_cutoff)
 
         raw_result = self.db.execute(
-            delete(DeviceAttendanceLog).where(DeviceAttendanceLog.uploaded_at < cutoff)
+            delete(DeviceAttendanceLog).where(DeviceAttendanceLog.uploaded_at < raw_cutoff)
         )
         raw_deleted = int(raw_result.rowcount or 0)
         self.db.commit()
         return {
             "punches_deleted": punches_deleted,
             "raw_logs_deleted": raw_deleted,
-            "retention_days": RETENTION_DAYS,
+            "retention_days": punch_days,
+            "punch_retention_days": punch_days,
+            "raw_log_retention_days": raw_days,
         }

@@ -71,6 +71,16 @@ class MemberRepository:
             self.db.execute(query.order_by(Member.created_at.desc(), Member.id.desc())).scalars().all()
         )
 
+    def list_member_ids_matching_search(self, search: str | None) -> list[int]:
+        """Return non-deleted member IDs matching search (newest first). IDs only."""
+        query: Select[tuple[int]] = select(Member.id).where(Member.deleted_at.is_(None))
+        search_filter = member_search_filter(search)
+        if search_filter is not None:
+            query = query.where(search_filter)
+        return list(
+            self.db.execute(query.order_by(Member.created_at.desc(), Member.id.desc())).scalars().all()
+        )
+
     def list_members_by_ids(self, member_ids: list[int]) -> list[Member]:
         if not member_ids:
             return []

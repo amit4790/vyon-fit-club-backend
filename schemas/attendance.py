@@ -41,4 +41,6 @@ class AttendancePurgeResponse(BaseModel):
     message: str
     punches_deleted: int
     raw_logs_deleted: int
-    retention_days: int = Field(default=90)
+    retention_days: int = Field(default=90, description="Punch retention days (compat)")
+    punch_retention_days: int = Field(default=90)
+    raw_log_retention_days: int = Field(default=14)

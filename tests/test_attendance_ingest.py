@@ -263,15 +263,19 @@ class TestMixedPayload:
         assert logs[0].is_processed is True
 
 
-class TestNonEmptyOperlogStillLogged:
-    def test_non_empty_operlog_is_stored(self, db: Session):
+class TestNonEmptyNoisyTablesNotLogged:
+    def test_non_empty_operlog_is_not_stored(self, db: Session):
         body = "OPERLOG:OPLOG 1\t2026-09-03 10:00:00\t0"
         response = asyncio.run(_post_cdata(db, sn="DEV1", table="OPERLOG", body=body))
         assert response.body == b"OK"
-        logs = db.execute(select(DeviceAttendanceLog)).scalars().all()
-        assert len(logs) == 1
-        assert logs[0].record_count == 1
+        assert db.execute(select(DeviceAttendanceLog)).scalars().all() == []
         assert db.execute(select(AttendancePunch)).scalars().all() == []
+
+    def test_non_empty_biodata_is_not_stored(self, db: Session):
+        body = "BIODATA:1\t0\t50\tABCDEF"
+        response = asyncio.run(_post_cdata(db, sn="DEV1", table="BIODATA", body=body))
+        assert response.body == b"OK"
+        assert db.execute(select(DeviceAttendanceLog)).scalars().all() == []
 
 
 class TestProtocolResponseUnchanged:

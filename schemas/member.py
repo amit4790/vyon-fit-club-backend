@@ -82,6 +82,14 @@ class MemberUpdateRequest(BaseModel):
         return value
 
 
+class ActiveMembershipSummary(BaseModel):
+    """Compact active membership row for the members list."""
+
+    subscription_id: int
+    plan_label: str
+    end_date: date
+
+
 class MemberResponse(BaseModel):
     """Member response model."""
 
@@ -102,6 +110,17 @@ class MemberResponse(BaseModel):
     device_uid: int | None = None
     device_card: int | None = None
     device_sync_status: str | None = None
+
+    # List-safe membership snapshot (batch-enriched on GET /admin/members).
+    membership_status: (
+        Literal["active", "active_pending_payment", "inactive_unpaid", "expired", "none"] | None
+    ) = None
+    current_plan_label: str | None = None
+    membership_start_date: date | None = None
+    membership_expiry_date: date | None = None
+    payment_status: str | None = None
+    focus_subscription_id: int | None = None
+    active_memberships: list[ActiveMembershipSummary] = Field(default_factory=list)
 
     class Config:
         from_attributes = True

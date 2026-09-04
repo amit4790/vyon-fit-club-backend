@@ -48,6 +48,33 @@ MEMBERSHIP_STATUS_FILTERS: dict[str, str] = {
     "none": "No Membership",
 }
 
+STATUS_LABEL_TO_KEY: dict[str, str] = {label: key for key, label in MEMBERSHIP_STATUS_FILTERS.items()}
+
+
+@dataclass(frozen=True)
+class ActiveMembershipItem:
+    subscription_id: int
+    plan_label: str
+    end_date: date
+
+
+@dataclass
+class MembershipSummary:
+    """List-safe membership snapshot for one member."""
+
+    status_key: str
+    status_label: str
+    plan_label: str | None
+    start_date: date | None
+    end_date: date | None
+    payment_status: str | None
+    focus_subscription_id: int | None
+    active_memberships: list[ActiveMembershipItem]
+    membership_cost: Decimal | None = None
+    discount: Decimal | None = None
+    amount_paid: Decimal | None = None
+    counsellor: str | None = None
+
 
 @dataclass
 class MemberExportRow:
@@ -137,17 +164,15 @@ class MemberExportService:
         members = self.member_repo.list_members_matching_search(search)
         return self._build_rows_for_members(members)
 
-    def _build_rows(self) -> list[MemberExportRow]:
-        members = self.member_repo.list_non_deleted_members()
-        rows = self._build_rows_for_members(members)
-        rows.sort(key=lambda row: (row.end_date is None, row.end_date or date.max, row.member_id))
-        return rows
+    def build_summaries_for_member_ids(self, member_ids: list[int]) -> dict[int, MembershipSummary]:
+        """Batch-compute membership summaries for the given member IDs."""
+        if not member_ids:
+            return {}
 
-    def _build_rows_for_members(self, members: list[Member]) -> list[MemberExportRow]:
-        member_ids = [member.id for member in members]
         subscriptions = self.subscription_repo.list_subscriptions_for_member_ids(member_ids)
-
-        subscriptions_by_member: dict[int, list[MembershipSubscription]] = {}
+        subscriptions_by_member: dict[int, list[MembershipSubscription]] = {
+            member_id: [] for member_id in member_ids
+        }
         for subscription in subscriptions:
             subscriptions_by_member.setdefault(subscription.member_id, []).append(subscription)
 
@@ -160,13 +185,25 @@ class MemberExportService:
                 latest_invoice_by_subscription[invoice.subscription_id] = invoice
 
         today = date.today()
-        return [
-            self._row_for_member(
-                member,
-                subscriptions_by_member.get(member.id, []),
+        return {
+            member_id: _summary_for_subscriptions(
+                subscriptions_by_member.get(member_id, []),
                 latest_invoice_by_subscription,
                 today,
             )
+            for member_id in member_ids
+        }
+
+    def _build_rows(self) -> list[MemberExportRow]:
+        members = self.member_repo.list_non_deleted_members()
+        rows = self._build_rows_for_members(members)
+        rows.sort(key=lambda row: (row.end_date is None, row.end_date or date.max, row.member_id))
+        return rows
+
+    def _build_rows_for_members(self, members: list[Member]) -> list[MemberExportRow]:
+        summaries = self.build_summaries_for_member_ids([member.id for member in members])
+        return [
+            _export_row_from_summary(member, summaries.get(member.id) or _empty_summary())
             for member in members
         ]
 
@@ -177,66 +214,8 @@ class MemberExportService:
         latest_invoice_by_subscription: dict[int, Invoice],
         today: date,
     ) -> MemberExportRow:
-        gender = (member.gender or "").strip()
-        gender_label = gender.capitalize() if gender else ""
-
-        if not subscriptions:
-            return MemberExportRow(
-                member_id=member.id,
-                member_name=member.full_name,
-                mobile=member.mobile_number,
-                gender=gender_label,
-                membership_name=None,
-                start_date=None,
-                end_date=None,
-                status="No Membership",
-                membership_cost=None,
-                discount=None,
-                amount_paid=None,
-                counsellor=None,
-            )
-
-        active = [
-            item
-            for item in subscriptions
-            if item.status == "active" and item.end_date >= today
-        ]
-        if active:
-            focus = min(active, key=lambda item: (item.end_date, item.id))
-            invoice = latest_invoice_by_subscription.get(focus.id)
-            money = _money_from_invoice(focus, invoice)
-            return MemberExportRow(
-                member_id=member.id,
-                member_name=member.full_name,
-                mobile=member.mobile_number,
-                gender=gender_label,
-                membership_name=_plan_name(focus),
-                start_date=focus.start_date,
-                end_date=focus.end_date,
-                status=_active_status_label(money.payment_status),
-                membership_cost=money.cost,
-                discount=money.discount,
-                amount_paid=money.amount_paid,
-                counsellor=money.counsellor,
-            )
-
-        latest = max(subscriptions, key=lambda item: (item.end_date, item.id))
-        invoice = latest_invoice_by_subscription.get(latest.id)
-        money = _money_from_invoice(latest, invoice)
-        return MemberExportRow(
-            member_id=member.id,
-            member_name=member.full_name,
-            mobile=member.mobile_number,
-            gender=gender_label,
-            membership_name=_plan_name(latest),
-            start_date=latest.start_date,
-            end_date=latest.end_date,
-            status="Expired",
-            membership_cost=money.cost,
-            discount=money.discount,
-            amount_paid=money.amount_paid,
-            counsellor=money.counsellor,
-        )
+        summary = _summary_for_subscriptions(subscriptions, latest_invoice_by_subscription, today)
+        return _export_row_from_summary(member, summary)
 
 
 @dataclass
@@ -247,6 +226,109 @@ class _MoneySnapshot:
     outstanding: Decimal
     payment_status: str
     counsellor: str | None
+
+
+def _empty_summary() -> MembershipSummary:
+    return MembershipSummary(
+        status_key="none",
+        status_label="No Membership",
+        plan_label=None,
+        start_date=None,
+        end_date=None,
+        payment_status=None,
+        focus_subscription_id=None,
+        active_memberships=[],
+    )
+
+
+def _summary_for_subscriptions(
+    subscriptions: list[MembershipSubscription],
+    latest_invoice_by_subscription: dict[int, Invoice],
+    today: date,
+) -> MembershipSummary:
+    if not subscriptions:
+        return _empty_summary()
+
+    active = [
+        item for item in subscriptions if item.status == "active" and item.end_date >= today
+    ]
+
+    if active:
+        money_by_id = {
+            item.id: _money_from_invoice(item, latest_invoice_by_subscription.get(item.id))
+            for item in active
+        }
+        # Prefer unpaid/partial for list action + status (matches Members UI); else soonest expiry.
+        unpaid = [item for item in active if money_by_id[item.id].payment_status != "paid"]
+        focus_pool = unpaid or active
+        focus = min(focus_pool, key=lambda item: (item.end_date, item.id))
+        money = money_by_id[focus.id]
+        status_label = _active_status_label(money.payment_status)
+        active_memberships = [
+            ActiveMembershipItem(
+                subscription_id=item.id,
+                plan_label=_plan_name(item),
+                end_date=item.end_date,
+            )
+            for item in sorted(active, key=lambda item: (item.end_date, item.id))
+        ]
+        return MembershipSummary(
+            status_key=STATUS_LABEL_TO_KEY.get(status_label, "active"),
+            status_label=status_label,
+            plan_label=" · ".join(item.plan_label for item in active_memberships if item.plan_label),
+            start_date=focus.start_date,
+            end_date=focus.end_date,
+            payment_status=money.payment_status,
+            focus_subscription_id=focus.id,
+            active_memberships=active_memberships,
+            membership_cost=money.cost,
+            discount=money.discount,
+            amount_paid=money.amount_paid,
+            counsellor=money.counsellor,
+        )
+
+    latest = max(subscriptions, key=lambda item: (item.end_date, item.id))
+    invoice = latest_invoice_by_subscription.get(latest.id)
+    money = _money_from_invoice(latest, invoice)
+    return MembershipSummary(
+        status_key="expired",
+        status_label="Expired",
+        plan_label=_plan_name(latest),
+        start_date=latest.start_date,
+        end_date=latest.end_date,
+        payment_status=money.payment_status,
+        focus_subscription_id=latest.id,
+        active_memberships=[],
+        membership_cost=money.cost,
+        discount=money.discount,
+        amount_paid=money.amount_paid,
+        counsellor=money.counsellor,
+    )
+
+
+def _export_row_from_summary(member: Member, summary: MembershipSummary) -> MemberExportRow:
+    gender = (member.gender or "").strip()
+    gender_label = gender.capitalize() if gender else ""
+    focus_plan = summary.plan_label
+    if summary.focus_subscription_id is not None and summary.active_memberships:
+        for item in summary.active_memberships:
+            if item.subscription_id == summary.focus_subscription_id:
+                focus_plan = item.plan_label
+                break
+    return MemberExportRow(
+        member_id=member.id,
+        member_name=member.full_name,
+        mobile=member.mobile_number,
+        gender=gender_label,
+        membership_name=focus_plan,
+        start_date=summary.start_date,
+        end_date=summary.end_date,
+        status=summary.status_label,
+        membership_cost=summary.membership_cost,
+        discount=summary.discount,
+        amount_paid=summary.amount_paid,
+        counsellor=summary.counsellor,
+    )
 
 
 def _to_money(value: object | None) -> Decimal:

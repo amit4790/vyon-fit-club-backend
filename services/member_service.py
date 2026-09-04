@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from models import Member
 from repositories import MemberRepository
 from schemas.member import MemberCreateRequest, MemberUpdateRequest
+from services.member_export_service import MEMBERSHIP_STATUS_FILTERS, MemberExportService, MembershipSummary
 from services.push_device_service import PushDeviceService
 from core.config import settings
 
@@ -57,33 +58,54 @@ class MemberService:
         search: str | None,
         membership_status: str | None = None,
         sort: str | None = None,
-    ) -> tuple[list[Member], int]:
+    ) -> tuple[list[Member], int, dict[int, MembershipSummary]]:
         normalized_sort = (sort or "").strip().lower() or None
         if normalized_sort and normalized_sort not in {"expiry"}:
             raise ValueError("Invalid sort option")
 
+        export_service = MemberExportService(self.db)
+
         if not membership_status and not normalized_sort:
-            return self.repository.list_members(page=page, page_size=page_size, search=search)
+            members, total_items = self.repository.list_members(
+                page=page, page_size=page_size, search=search
+            )
+            summaries = export_service.build_summaries_for_member_ids([member.id for member in members])
+            return members, total_items, summaries
 
-        from services.member_export_service import MEMBERSHIP_STATUS_FILTERS, MemberExportService
-
-        rows = MemberExportService(self.db).build_rows_for_search(search)
-
+        status_label = None
         if membership_status:
             status_label = MEMBERSHIP_STATUS_FILTERS.get(membership_status)
             if status_label is None:
                 raise ValueError("Invalid membership status filter")
-            rows = [row for row in rows if row.status == status_label]
+
+        # ID-only scan + batch subscription/invoice summaries, then paginate.
+        member_ids = self.repository.list_member_ids_matching_search(search)
+        summaries = export_service.build_summaries_for_member_ids(member_ids)
+
+        ranked: list[tuple[int, MembershipSummary]] = []
+        for member_id in member_ids:
+            summary = summaries.get(member_id)
+            if summary is None:
+                continue
+            if status_label is not None and summary.status_label != status_label:
+                continue
+            ranked.append((member_id, summary))
 
         if normalized_sort == "expiry":
-            rows.sort(key=lambda row: (row.end_date is None, row.end_date or date.max, row.member_id))
+            ranked.sort(
+                key=lambda item: (
+                    item[1].end_date is None,
+                    item[1].end_date or date.max,
+                    item[0],
+                )
+            )
 
-        filtered_ids = [row.member_id for row in rows]
-        total_items = len(filtered_ids)
+        total_items = len(ranked)
         start = (page - 1) * page_size
-        page_ids = filtered_ids[start : start + page_size]
-        return self.repository.list_members_by_ids(page_ids), total_items
-
+        page_ids = [member_id for member_id, _ in ranked[start : start + page_size]]
+        members = self.repository.list_members_by_ids(page_ids)
+        page_summaries = {member_id: summaries[member_id] for member_id in page_ids if member_id in summaries}
+        return members, total_items, page_summaries
     @staticmethod
     def _normalize_device_user_id(device_user_id: str | None) -> str | None:
         if device_user_id is None:

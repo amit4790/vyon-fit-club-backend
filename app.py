@@ -19,6 +19,7 @@ from routes import (
     mobile_auth_router,
     member_router,
     trainer_router,
+    internal_router,
 )
 
 
@@ -67,6 +68,7 @@ def create_app() -> FastAPI:
     app.include_router(trainer_router)
     app.include_router(device_router)
     app.include_router(device_mgmt_router)
+    app.include_router(internal_router)
     return app
 
 

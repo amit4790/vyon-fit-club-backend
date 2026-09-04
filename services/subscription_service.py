@@ -300,6 +300,9 @@ class SubscriptionService:
         bonus_duration_value: int | None = None,
         bonus_duration_unit: str | None = None,
     ) -> tuple[SubscriptionResponse, list[dict]]:
+        # Keep expiry/device access current on write paths (not on list GETs).
+        self.sync_expired_subscriptions()
+
         member = self.repo.get_member_by_id(member_id)
         if not member:
             raise MemberNotFoundError("Member not found")
@@ -403,6 +406,8 @@ class SubscriptionService:
         bonus_duration_unit: str | None = None,
     ) -> SubscriptionResponse:
         """Update an existing subscription to a different membership plan."""
+        self.sync_expired_subscriptions()
+
         row = self.repo.get_subscription_by_id(subscription_id)
         if not row:
             raise SubscriptionNotFoundError("Subscription not found")

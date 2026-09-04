@@ -28,6 +28,7 @@ from schemas.device import (
     MemberDeviceUnlinkRequest,
 )
 from schemas.member import (
+    ActiveMembershipSummary,
     MemberCreateRequest,
     MemberDeleteResponse,
     MemberListResponse,
@@ -133,7 +134,31 @@ def _raise_device_http_exception(exc: Exception) -> None:
     raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
 
-def _to_member_response(member) -> MemberResponse:
+def _to_member_response(member, membership_summary=None) -> MemberResponse:
+    active_memberships: list[ActiveMembershipSummary] = []
+    membership_status = None
+    current_plan_label = None
+    membership_start_date = None
+    membership_expiry_date = None
+    payment_status = None
+    focus_subscription_id = None
+
+    if membership_summary is not None:
+        membership_status = membership_summary.status_key
+        current_plan_label = membership_summary.plan_label
+        membership_start_date = membership_summary.start_date
+        membership_expiry_date = membership_summary.end_date
+        payment_status = membership_summary.payment_status
+        focus_subscription_id = membership_summary.focus_subscription_id
+        active_memberships = [
+            ActiveMembershipSummary(
+                subscription_id=item.subscription_id,
+                plan_label=item.plan_label,
+                end_date=item.end_date,
+            )
+            for item in membership_summary.active_memberships
+        ]
+
     return MemberResponse(
         id=member.id,
         full_name=member.full_name,
@@ -151,6 +176,13 @@ def _to_member_response(member) -> MemberResponse:
         device_uid=member.device_uid,
         device_card=member.device_card,
         device_sync_status=member.device_sync_status,
+        membership_status=membership_status,
+        current_plan_label=current_plan_label,
+        membership_start_date=membership_start_date,
+        membership_expiry_date=membership_expiry_date,
+        payment_status=payment_status,
+        focus_subscription_id=focus_subscription_id,
+        active_memberships=active_memberships,
     )
 
 
@@ -430,7 +462,7 @@ def get_members(
     """
     service = MemberService(db)
     try:
-        members, total_items = service.list_members(
+        members, total_items, summaries = service.list_members(
             page=page,
             page_size=page_size,
             search=search,
@@ -446,7 +478,7 @@ def get_members(
 
     return MemberListResponse(
         message="Members list",
-        data=[_to_member_response(member) for member in members],
+        data=[_to_member_response(member, summaries.get(member.id)) for member in members],
         pagination=PaginationMeta(
             page=page,
             page_size=page_size,
@@ -542,7 +574,6 @@ def delete_member(member_id: int, db: Session = Depends(get_db)) -> MemberDelete
 def get_plan_catalog(db: Session = Depends(get_db)) -> PlanCatalogResponse:
     """Get active membership plan catalog."""
     service = SubscriptionService(db)
-    service.sync_expired_subscriptions()
     catalog = service.get_plan_catalog()
     return PlanCatalogResponse(message="Plan catalog", data=catalog)
 
@@ -663,7 +694,6 @@ def get_expiring_subscriptions(
 ) -> ExpiringSubscriptionsResponse:
     """Get active subscriptions expiring within the configured window."""
     service = SubscriptionService(db)
-    service.sync_expired_subscriptions()
     result = service.get_expiring_subscriptions(days=days, page=page, page_size=page_size)
 
     total_pages = result.total_items // page_size + (1 if result.total_items % page_size else 0)
@@ -690,7 +720,6 @@ def export_expiring_subscriptions(
 ) -> Response:
     """Download Excel of all active subscriptions expiring within the window."""
     service = SubscriptionService(db)
-    service.sync_expired_subscriptions()
     content = service.build_expiring_subscriptions_xlsx(days=days)
     filename = f"expiring-subscriptions-next-{days}-days.xlsx"
     return Response(
@@ -889,6 +918,8 @@ def purge_old_attendance(db: Session = Depends(get_db)) -> AttendancePurgeRespon
         punches_deleted=result["punches_deleted"],
         raw_logs_deleted=result["raw_logs_deleted"],
         retention_days=result["retention_days"],
+        punch_retention_days=result["punch_retention_days"],
+        raw_log_retention_days=result["raw_log_retention_days"],
     )
 
 

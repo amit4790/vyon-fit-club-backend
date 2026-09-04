@@ -38,7 +38,8 @@ class Settings(BaseSettings):
 
     # ZKTeco PUSH Protocol settings (official iClock/ADMS HTTP protocol)
     device_push_enabled: bool = True
-    device_push_log_raw: bool = True  # Log complete raw payloads for debugging
+    # Full raw payload logging (Render logs / extras). Keep false in production.
+    device_push_log_raw: bool = False
     # Device ATTLOG timestamps are local wall clock with no offset (gym is India).
     device_timezone: str = "Asia/Kolkata"
     # Throttle push_devices.last_seen writes (seconds). Cuts Neon write churn from heartbeats/polls.
@@ -46,6 +47,14 @@ class Settings(BaseSettings):
     # After an empty command poll, skip DB for this many seconds and reply OK from memory.
     # Longer windows let Neon autosuspend between polls (single Render instance assumed).
     device_empty_poll_skip_seconds: int = 180
+    # Only these cdata tables are written to device_attendance_logs (comma-separated).
+    # OPERLOG/BIODATA are ack'd without insert. Set "ATTLOG,USERINFO" while debugging sync.
+    device_persist_cdata_tables: str = "ATTLOG"
+    # Retention: punches kept longer for payroll; raw blobs are debug-only.
+    attendance_punch_retention_days: int = 90
+    device_raw_log_retention_days: int = 14
+    # Shared secret for POST /api/internal/cron/* (Render Cron Job header X-Cron-Secret).
+    cron_secret: str = ""
 
     # Production administrator bootstrap settings
     super_admin_email: str = "admin@vyonfitclub.com"
@@ -88,6 +97,15 @@ class Settings(BaseSettings):
     def get_cors_origins(self) -> List[str]:
         """Parse CORS origins from comma-separated string."""
         return [origin.strip() for origin in self.cors_origins.split(",")]
+
+    @property
+    def device_persist_cdata_table_set(self) -> set[str]:
+        """Uppercase table names allowed to persist into device_attendance_logs."""
+        return {
+            part.strip().upper()
+            for part in self.device_persist_cdata_tables.split(",")
+            if part.strip()
+        }
 
     @property
     def effective_jwt_secret_key(self) -> str:

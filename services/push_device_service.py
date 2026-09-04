@@ -477,14 +477,14 @@ class PushDeviceService:
         content_length: Optional[int] = None
     ) -> Optional[DeviceAttendanceLog]:
         """
-        Log raw device table upload (ATTLOG, USERINFO, BIODATA, OPERLOG, ...).
+        Log raw device table upload when persistence is enabled for that table.
 
         Called when device posts to POST /iclock/cdata.
-        Stores complete raw payload for analysis and future parsing.
 
-        Empty blank/whitespace uploads are acknowledged by the route without
-        writing device_attendance_logs — ZKTeco devices frequently POST empty
-        OPERLOG/ATTLOG bodies that would otherwise dominate Neon write volume.
+        Skips Neon writes for:
+        - blank/whitespace bodies (common empty OPERLOG/ATTLOG uploads)
+        - tables not in ``settings.device_persist_cdata_tables`` (default: ATTLOG only;
+          OPERLOG/BIODATA are ack'd without insert)
 
         Emptiness is detected with ``not raw_payload.strip()`` only — never with
         ``record_count == 0`` alone. Bare ATTLOG lines without an ``ATTLOG:``
@@ -492,6 +492,7 @@ class PushDeviceService:
         """
         normalized_table = (table_name or "").strip().upper()
         record_count = self._count_table_records(raw_payload, normalized_table)
+        persist_tables = settings.device_persist_cdata_table_set
 
         # Skip persistence only for blank payloads. Do not use record_count alone —
         # ATTLOG rows may omit the "ATTLOG:" prefix and still contain punches.
@@ -504,6 +505,20 @@ class PushDeviceService:
                     "table": normalized_table or None,
                     "record_count": 0,
                     "payload_size": len(raw_payload),
+                },
+            )
+            return None
+
+        if not normalized_table or normalized_table not in persist_tables:
+            logger.info(
+                f"Device table upload skipped (not persisted): table={normalized_table or 'UNKNOWN'} "
+                f"from device {device_serial}",
+                extra={
+                    "device_serial": device_serial,
+                    "table": normalized_table or None,
+                    "record_count": record_count,
+                    "payload_size": len(raw_payload),
+                    "persist_tables": sorted(persist_tables),
                 },
             )
             return None
