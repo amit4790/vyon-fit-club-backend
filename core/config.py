@@ -42,11 +42,13 @@ class Settings(BaseSettings):
     device_push_log_raw: bool = False
     # Device ATTLOG timestamps are local wall clock with no offset (gym is India).
     device_timezone: str = "Asia/Kolkata"
-    # Throttle push_devices.last_seen writes (seconds). Cuts Neon write churn from heartbeats/polls.
-    device_presence_write_interval_seconds: int = 600
-    # After an empty command poll, skip DB for this many seconds and reply OK from memory.
-    # Longer windows let Neon autosuspend between polls (single Render instance assumed).
-    device_empty_poll_skip_seconds: int = 180
+    # Throttle push_devices.last_seen writes (seconds) for heartbeats/empty polls.
+    # POST cdata/devicecmd force-touch so real device traffic keeps Neon warm enough
+    # for ZKTeco's short upload timeouts.
+    device_presence_write_interval_seconds: int = 120
+    # After an empty command poll, skip DB briefly. Keep short — long windows plus a
+    # sleeping Neon caused the device to miss ATTLOG uploads after churn cuts.
+    device_empty_poll_skip_seconds: int = 30
     # Only these cdata tables are written to device_attendance_logs (comma-separated).
     # OPERLOG/BIODATA are ack'd without insert. Set "ATTLOG,USERINFO" while debugging sync.
     device_persist_cdata_tables: str = "ATTLOG"

@@ -117,7 +117,7 @@ async def get_device_command(
     db = SessionLocal()
     try:
         service = PushDeviceService(db)
-        service.register_or_update_device(SN)
+        service.register_or_update_device(SN, force_touch=True)
         command = service.get_pending_command(SN)
 
         if command:
@@ -198,8 +198,8 @@ async def acknowledge_device_command(
     """
     service = PushDeviceService(db)
     
-    # Throttled presence — do not force a Neon write on every ack.
-    service.register_or_update_device(SN)
+    # Real device traffic — force presence so Neon stays warm for short device timeouts.
+    service.register_or_update_device(SN, force_touch=True)
     
     # Read raw response body
     body_bytes = await request.body()
@@ -351,8 +351,9 @@ async def receive_attendance_data(
     """
     service = PushDeviceService(db)
     
-    # Throttled presence — empty/noisy uploads must not keep Neon awake.
-    service.register_or_update_device(SN)
+    # Force presence on every upload. Empty OPERLOG used to keep Neon awake via
+    # these writes; throttling here let Neon autosuspend and ATTLOG POSTs timed out.
+    service.register_or_update_device(SN, force_touch=True)
     
     table = (request.query_params.get("table") or "").strip().upper()
     body_bytes = await request.body()

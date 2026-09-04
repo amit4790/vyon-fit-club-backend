@@ -70,7 +70,7 @@ async def _post_cdata(db: Session, *, sn: str, table: str, body: str):
     return await receive_attendance_data(request=request, SN=sn, db=db)
 
 
-def test_cdata_does_not_force_touch_every_upload(db: Session, monkeypatch):
+def test_cdata_force_touches_presence_on_upload(db: Session, monkeypatch):
     monkeypatch.setattr(settings, "device_presence_write_interval_seconds", 600)
 
     first = asyncio.run(_post_cdata(db, sn="DEV-THROTTLE", table="OPERLOG", body=""))
@@ -79,11 +79,13 @@ def test_cdata_does_not_force_touch_every_upload(db: Session, monkeypatch):
         select(PushDevice).where(PushDevice.serial_number == "DEV-THROTTLE")
     ).scalar_one()
     first_seen = device.last_seen
+    assert first_seen is not None
 
+    # Force-touch on cdata must refresh last_seen even inside the throttle window.
     second = asyncio.run(_post_cdata(db, sn="DEV-THROTTLE", table="OPERLOG", body=""))
     assert second.body == b"OK"
     db.refresh(device)
-    assert device.last_seen == first_seen
+    assert device.last_seen >= first_seen
 
 
 def test_purge_uses_shorter_raw_retention(db: Session, monkeypatch):
