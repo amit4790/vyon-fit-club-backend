@@ -13,6 +13,12 @@ from datetime import date, datetime, time, timedelta, timezone
 from sqlalchemy.orm import Session
 
 from core.device_pins import resolve_device_pin
+from core.device_time import (
+    gym_day_bounds_utc,
+    gym_month_bounds_utc,
+    parse_device_wall_clock,
+    to_device_local,
+)
 from sqlalchemy import delete
 
 from models import AttendancePunch, DeviceAttendanceLog, User
@@ -21,7 +27,7 @@ from repositories.trainer_repository import TrainerRepository
 
 logger = logging.getLogger(__name__)
 
-# Gym-wide late rule for v1 (can move to business_settings later).
+# Gym-wide late rule for v1 (can move to business_settings later). Evaluated in device TZ.
 DEFAULT_SHIFT_START = time(6, 0)
 DEFAULT_GRACE_MINUTES = 15
 RETENTION_DAYS = 90
@@ -69,9 +75,8 @@ class AttendanceService:
             if not match:
                 continue
             pin = int(match.group(1))
-            punched_at = datetime.strptime(match.group(2), "%Y-%m-%d %H:%M:%S").replace(
-                tzinfo=timezone.utc
-            )
+            # Device sends local gym wall clock (no TZ). Convert to real UTC.
+            punched_at = parse_device_wall_clock(match.group(2))
             parsed.append((pin, punched_at, line[:500]))
         return parsed
 
@@ -124,7 +129,7 @@ class AttendanceService:
 
     @staticmethod
     def _is_late(punched_at: datetime) -> bool:
-        local_time = punched_at.astimezone(timezone.utc).time()
+        local_time = to_device_local(punched_at).time()
         threshold_minutes = DEFAULT_SHIFT_START.hour * 60 + DEFAULT_SHIFT_START.minute + DEFAULT_GRACE_MINUTES
         punch_minutes = local_time.hour * 60 + local_time.minute
         return punch_minutes > threshold_minutes
@@ -134,8 +139,7 @@ class AttendanceService:
         return {trainer.id: trainer for trainer in trainers}
 
     def get_daily_trainer_attendance(self, day: date) -> list[DailyPunchRow]:
-        start = datetime.combine(day, time.min, tzinfo=timezone.utc)
-        end = start + timedelta(days=1)
+        start, end = gym_day_bounds_utc(day)
         punches = self.repo.list_punches(person_type="trainer", start_at=start, end_at=end)
         trainers = self._trainer_name_map()
 
@@ -161,18 +165,14 @@ class AttendanceService:
         return rows
 
     def get_monthly_trainer_summary(self, year: int, month: int) -> list[MonthlyTrainerRow]:
-        start = datetime(year, month, 1, tzinfo=timezone.utc)
-        if month == 12:
-            end = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
-        else:
-            end = datetime(year, month + 1, 1, tzinfo=timezone.utc)
+        start, end = gym_month_bounds_utc(year, month)
 
         punches = self.repo.list_punches(person_type="trainer", start_at=start, end_at=end)
         trainers = self._trainer_name_map()
 
         first_punch_by_day: dict[tuple[int, date], AttendancePunch] = {}
         for punch in punches:
-            day_key = (punch.person_id, punch.punched_at.astimezone(timezone.utc).date())
+            day_key = (punch.person_id, to_device_local(punch.punched_at).date())
             if day_key not in first_punch_by_day:
                 first_punch_by_day[day_key] = punch
 
@@ -210,11 +210,7 @@ class AttendanceService:
         return rows
 
     def build_month_csv(self, year: int, month: int) -> str:
-        start = datetime(year, month, 1, tzinfo=timezone.utc)
-        if month == 12:
-            end = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
-        else:
-            end = datetime(year, month + 1, 1, tzinfo=timezone.utc)
+        start, end = gym_month_bounds_utc(year, month)
 
         punches = self.repo.list_punches(person_type="trainer", start_at=start, end_at=end)
         trainers = self._trainer_name_map()
@@ -226,7 +222,7 @@ class AttendanceService:
         )
         for punch in punches:
             trainer = trainers.get(punch.person_id)
-            punched_at = punch.punched_at.astimezone(timezone.utc)
+            punched_at = to_device_local(punch.punched_at)
             writer.writerow(
                 [
                     punched_at.date().isoformat(),

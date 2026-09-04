@@ -2,6 +2,10 @@
 
 TRAINER_PIN_OFFSET = 50_000
 
+# ZKTeco USERINFO Pri values (PUSH/ADMS).
+DEVICE_PRIVILEGE_NORMAL = 0
+DEVICE_PRIVILEGE_INACTIVE = 1
+
 
 def member_pin(member_id: int) -> int:
     return int(member_id)

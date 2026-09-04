@@ -279,3 +279,43 @@ class TestProtocolResponseUnchanged:
         response = asyncio.run(_post_cdata(db, sn="DEV1", table="OPERLOG", body=""))
         assert response.media_type == "text/plain"
         assert response.body == b"OK"
+
+
+class TestDeviceTimezoneIngest:
+    def test_attlog_wall_clock_stored_as_real_utc(self, db: Session):
+        """
+        Device sends India local time without offset.
+        08:54:45 IST must become 03:24:45 UTC (not labeled as 08:54 UTC).
+        """
+        from datetime import timezone
+
+        from core.device_time import parse_device_wall_clock
+
+        expected = parse_device_wall_clock("2026-09-03 08:54:45")
+        assert expected.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S") == "2026-09-03 03:24:45"
+
+        inserted = AttendanceService(db).ingest_attlog_payload(
+            device_serial="DEV1",
+            raw_payload="50012\t2026-09-03 08:54:45\t0\t1\t0\t0",
+        )
+        assert inserted == 1
+        punch = db.execute(select(AttendancePunch)).scalar_one()
+        # Compare absolute instants (SQLite test DB may drop tzinfo on round-trip).
+        stored = punch.punched_at
+        if stored.tzinfo is None:
+            stored = stored.replace(tzinfo=timezone.utc)
+        assert stored.astimezone(timezone.utc) == expected.astimezone(timezone.utc)
+
+    def test_daily_query_uses_gym_calendar_day(self, db: Session):
+        from datetime import date
+
+        # 23:30 IST on Sep 3 => 18:00 UTC Sep 3 — still Sep 3 gym day.
+        AttendanceService(db).ingest_attlog_payload(
+            device_serial="DEV1",
+            raw_payload="50007\t2026-09-03 23:30:00\t0\t1\t0\t0",
+        )
+        rows = AttendanceService(db).get_daily_trainer_attendance(date(2026, 9, 3))
+        assert len(rows) == 1
+        assert rows[0].person_id == 7
+        # Late vs 06:15 IST threshold — 23:30 is late.
+        assert rows[0].is_late is True
