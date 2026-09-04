@@ -113,6 +113,10 @@ class SubscriptionRepository:
 
         query: Select[tuple[MembershipSubscription]] = (
             select(MembershipSubscription)
+            .options(
+                joinedload(MembershipSubscription.member),
+                joinedload(MembershipSubscription.plan),
+            )
             .where(filters)
             .order_by(MembershipSubscription.end_date.asc(), MembershipSubscription.id.asc())
         )

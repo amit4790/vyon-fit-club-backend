@@ -4,6 +4,7 @@ Subscription business logic and pricing calculations.
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 from calendar import monthrange
@@ -514,6 +515,80 @@ class SubscriptionService:
             items=[self._to_subscription_response(row) for row in rows],
             total_items=total_items,
         )
+
+    def build_expiring_subscriptions_xlsx(self, days: int) -> bytes:
+        """Excel export of all active subscriptions ending within the lookahead window."""
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+        today = date.today()
+        limit_date = today + timedelta(days=days)
+        rows, _total = self.repo.list_expiring_subscriptions(
+            from_date=today,
+            to_date=limit_date,
+            page=1,
+            page_size=10_000,
+        )
+
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Expiring"
+
+        headers = [
+            "Member ID",
+            "Member Name",
+            "Mobile",
+            "Plan",
+            "Duration",
+            "Start Date",
+            "End Date",
+            "Days Remaining",
+            "Payment Status",
+        ]
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill("solid", fgColor="B91C1C")
+        thin = Border(
+            left=Side(style="thin", color="D1D5DB"),
+            right=Side(style="thin", color="D1D5DB"),
+            top=Side(style="thin", color="D1D5DB"),
+            bottom=Side(style="thin", color="D1D5DB"),
+        )
+
+        for col_index, header in enumerate(headers, start=1):
+            cell = sheet.cell(row=1, column=col_index, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border = thin
+
+        for row_index, row in enumerate(rows, start=2):
+            member = row.member
+            days_remaining = (row.end_date - today).days
+            values = [
+                row.member_id,
+                member.full_name if member else "",
+                (member.mobile_number if member else "") or "",
+                row.plan.name if row.plan else "",
+                self._resolve_duration_label(row),
+                row.start_date.isoformat(),
+                row.end_date.isoformat(),
+                days_remaining,
+                row.payment_status,
+            ]
+            for col_index, value in enumerate(values, start=1):
+                cell = sheet.cell(row=row_index, column=col_index, value=value)
+                cell.border = thin
+                cell.alignment = Alignment(vertical="center")
+
+        widths = [12, 24, 16, 28, 16, 14, 14, 14, 16]
+        from openpyxl.utils import get_column_letter
+
+        for index, width in enumerate(widths, start=1):
+            sheet.column_dimensions[get_column_letter(index)].width = width
+
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        return buffer.getvalue()
 
     def _to_subscription_response(
         self,
