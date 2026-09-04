@@ -76,7 +76,14 @@ class AttendanceService:
         return parsed
 
     def ingest_attlog_payload(self, *, device_serial: str, raw_payload: str) -> int:
-        """Parse ATTLOG text and insert trainer/member punches. Returns inserted count."""
+        """
+        Parse ATTLOG text and insert trainer punches. Returns inserted count.
+
+        Gym policy: only trainer attendance is required.
+        PIN convention (unchanged): trainer PIN = 50000 + trainer_id.
+        Member / non-trainer PINs (PIN <= 50000) are ignored with no punch
+        insert and no member lookup.
+        """
         inserted = 0
         for pin, punched_at, raw_line in self._parse_attlog_lines(raw_payload):
             resolved = resolve_device_pin(pin)
@@ -84,7 +91,10 @@ class AttendanceService:
                 continue
             person_type, person_id = resolved
 
-            # v1 focus: trainers. Still store member punches for future UI.
+            # Ignore member/non-trainer punches before any punch-table DB work.
+            if person_type != "trainer":
+                continue
+
             punch = AttendancePunch(
                 device_serial=device_serial,
                 pin=pin,
