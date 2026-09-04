@@ -133,12 +133,12 @@ def test_cron_purge_requires_secret(db: Session, monkeypatch):
     assert response.raw_log_retention_days == settings.device_raw_log_retention_days
 
 
-def test_userinfo_skipped_by_default(db: Session):
+def test_userinfo_is_stored(db: Session):
     service = PushDeviceService(db)
     result = service.log_device_table_upload(
         device_serial="DEV1",
         raw_payload="PIN=1\tName=Test",
         table_name="USERINFO",
     )
-    assert result is None
-    assert db.execute(select(DeviceAttendanceLog)).scalars().all() == []
+    assert result is not None
+    assert len(db.execute(select(DeviceAttendanceLog)).scalars().all()) == 1

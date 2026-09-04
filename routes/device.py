@@ -355,34 +355,32 @@ async def receive_attendance_data(
     """
     service = PushDeviceService(db)
     
-    # Force presence on every upload. Empty OPERLOG used to keep Neon awake via
-    # these writes; throttling here let Neon autosuspend and ATTLOG POSTs timed out.
+    # Real device activity — always refresh presence.
     service.register_or_update_device(SN, force_touch=True)
     
     table = (request.query_params.get("table") or "").strip().upper()
     body_bytes = await request.body()
     raw_payload = body_bytes.decode('utf-8', errors='replace')
 
-    if settings.device_push_log_raw:
-        banner = "USERINFO PAYLOAD RECEIVED" if table == "USERINFO" else "DEVICE PUSH RECEIVED"
-        print("\n" + "=" * 80)
-        print(banner)
-        print("=" * 80)
-        print(f"Method: {request.method}")
-        print(f"URL: {request.url}")
-        print(f"Query Params: {dict(request.query_params)}")
-        print(f"Table: {table or request.query_params.get('table')}")
-        print(f"Headers: {dict(request.headers)}")
-        print("Payload:")
-        print(raw_payload)
-        print("=" * 80 + "\n")
+    banner = "USERINFO PAYLOAD RECEIVED" if table == "USERINFO" else "DEVICE PUSH RECEIVED"
+    print("\n" + "=" * 80)
+    print(banner)
+    print("=" * 80)
+    print(f"Method: {request.method}")
+    print(f"URL: {request.url}")
+    print(f"Query Params: {dict(request.query_params)}")
+    print(f"Table: {table or request.query_params.get('table')}")
+    print(f"Headers: {dict(request.headers)}")
+    print("Payload:")
+    print(raw_payload)
+    print("=" * 80 + "\n")
         
     # Get request metadata
     content_type = request.headers.get('content-type')
     content_length = request.headers.get('content-length')
     content_length_int = int(content_length) if content_length else len(body_bytes)
     
-    # Persist only allowlisted non-empty tables (default: ATTLOG).
+    # Persist raw upload (ATTLOG, USERINFO, OPERLOG, and other tables) — pre-morning path.
     attendance_log = service.log_device_table_upload(
         device_serial=SN,
         raw_payload=raw_payload,
@@ -391,7 +389,6 @@ async def receive_attendance_data(
         content_length=content_length_int
     )
 
-    # Parse ATTLOG punches even when raw blob persistence is disabled for the table.
     if table == "ATTLOG" and raw_payload.strip():
         try:
             from services.attendance_service import AttendanceService
@@ -400,29 +397,15 @@ async def receive_attendance_data(
                 device_serial=SN,
                 raw_payload=raw_payload,
             )
-            if attendance_log is not None:
-                attendance_log.is_processed = True
-                attendance_log.processed_at = datetime.utcnow()
-                db.commit()
+            attendance_log.is_processed = True
+            attendance_log.processed_at = datetime.utcnow()
+            db.commit()
             logger.info(
                 f"ATTLOG parsed into attendance punches: inserted={inserted}",
                 extra={"device_serial": SN, "inserted": inserted},
             )
         except Exception:
             logger.exception("Failed to parse ATTLOG into attendance punches", extra={"device_serial": SN})
-
-    if attendance_log is None:
-        logger.info(
-            f"Device table data received (not stored): table={table or 'UNKNOWN'} from device {SN}",
-            extra={
-                "device_serial": SN,
-                "table": table or None,
-                "record_count": 0,
-                "payload_size": content_length_int,
-                "endpoint": "POST /iclock/cdata",
-            },
-        )
-        return Response(content="OK", media_type="text/plain")
     
     logger.info(
         f"Device table data received: table={table or 'UNKNOWN'} "

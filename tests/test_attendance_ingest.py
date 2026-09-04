@@ -61,67 +61,33 @@ async def _post_cdata(db: Session, *, sn: str, table: str, body: str):
     return await receive_attendance_data(request=request, SN=sn, db=db)
 
 
-class TestEmptyUploadSkip:
-    def test_empty_operlog_returns_ok_without_device_attendance_log(self, db: Session):
+class TestEmptyUploadPersisted:
+    """Pre-morning ADMS path: empty bodies are still stored (connectivity proof)."""
+
+    def test_empty_operlog_returns_ok_and_stores_raw_log(self, db: Session):
         response = asyncio.run(_post_cdata(db, sn="TBS2254700504", table="OPERLOG", body=""))
         assert response.body == b"OK"
-        assert db.execute(select(DeviceAttendanceLog)).scalars().all() == []
+        logs = db.execute(select(DeviceAttendanceLog)).scalars().all()
+        assert len(logs) == 1
         device = db.execute(
             select(PushDevice).where(PushDevice.serial_number == "TBS2254700504")
         ).scalar_one()
         assert device is not None
 
-    def test_empty_attlog_returns_ok_without_device_attendance_log(self, db: Session):
+    def test_empty_attlog_returns_ok_and_stores_raw_log(self, db: Session):
         response = asyncio.run(_post_cdata(db, sn="TBS2254700504", table="ATTLOG", body="   \n"))
         assert response.body == b"OK"
-        assert db.execute(select(DeviceAttendanceLog)).scalars().all() == []
+        assert len(db.execute(select(DeviceAttendanceLog)).scalars().all()) == 1
 
-    def test_service_skips_empty_upload(self, db: Session):
+    def test_service_stores_empty_upload(self, db: Session):
         service = PushDeviceService(db)
         result = service.log_device_table_upload(
             device_serial="DEV1",
             raw_payload="",
             table_name="OPERLOG",
         )
-        assert result is None
-        assert db.execute(select(DeviceAttendanceLog)).scalars().all() == []
-
-    @pytest.mark.parametrize(
-        "raw_payload",
-        [
-            "",  # completely empty ZKTeco body
-            " \r\n\t \r\n",  # whitespace-only body observed in empty uploads
-        ],
-        ids=["empty_string", "whitespace_crlf_tabs"],
-    )
-    def test_observed_empty_zkteco_upload_shapes(self, db: Session, raw_payload: str):
-        """
-        Regression for production empty PUSH uploads (record_count was 0 in DB).
-
-        Emptiness must be ``not raw_payload.strip()`` — not ``record_count == 0``.
-        """
-        assert not raw_payload.strip()
-
-        response = asyncio.run(
-            _post_cdata(
-                db,
-                sn="TBS2254700504",
-                table="OPERLOG",
-                body=raw_payload,
-            )
-        )
-        assert response.status_code == 200
-        assert response.body == b"OK"
-        assert response.media_type == "text/plain"
-        assert db.execute(select(DeviceAttendanceLog)).scalars().all() == []
-        assert db.execute(select(AttendancePunch)).scalars().all() == []
-        # Presence / registration still runs for protocol health.
-        assert (
-            db.execute(
-                select(PushDevice).where(PushDevice.serial_number == "TBS2254700504")
-            ).scalar_one_or_none()
-            is not None
-        )
+        assert result is not None
+        assert len(db.execute(select(DeviceAttendanceLog)).scalars().all()) == 1
 
 
 class TestBareAttlogNotTreatedAsEmpty:
@@ -263,19 +229,20 @@ class TestMixedPayload:
         assert logs[0].is_processed is True
 
 
-class TestNonEmptyNoisyTablesNotLogged:
-    def test_non_empty_operlog_is_not_stored(self, db: Session):
+class TestNonEmptyNoisyTablesLogged:
+    def test_non_empty_operlog_is_stored(self, db: Session):
         body = "OPERLOG:OPLOG 1\t2026-09-03 10:00:00\t0"
         response = asyncio.run(_post_cdata(db, sn="DEV1", table="OPERLOG", body=body))
         assert response.body == b"OK"
-        assert db.execute(select(DeviceAttendanceLog)).scalars().all() == []
+        logs = db.execute(select(DeviceAttendanceLog)).scalars().all()
+        assert len(logs) == 1
         assert db.execute(select(AttendancePunch)).scalars().all() == []
 
-    def test_non_empty_biodata_is_not_stored(self, db: Session):
+    def test_non_empty_biodata_is_stored(self, db: Session):
         body = "BIODATA:1\t0\t50\tABCDEF"
         response = asyncio.run(_post_cdata(db, sn="DEV1", table="BIODATA", body=body))
         assert response.body == b"OK"
-        assert db.execute(select(DeviceAttendanceLog)).scalars().all() == []
+        assert len(db.execute(select(DeviceAttendanceLog)).scalars().all()) == 1
 
 
 class TestProtocolResponseUnchanged:
