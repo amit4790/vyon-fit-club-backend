@@ -46,9 +46,11 @@ class Settings(BaseSettings):
     # POST cdata/devicecmd force-touch so real device traffic keeps Neon warm enough
     # for ZKTeco's short upload timeouts.
     device_presence_write_interval_seconds: int = 120
-    # After an empty command poll, skip DB briefly. Keep short — long windows plus a
-    # sleeping Neon caused the device to miss ATTLOG uploads after churn cuts.
-    device_empty_poll_skip_seconds: int = 30
+    # After an empty command poll, skip DB for this many seconds.
+    # MUST stay 0 (or very low) on multi-instance Render: the empty-poll cache is
+    # process-local, so queuing commands on one instance does not clear another
+    # instance's skip window — device keeps getting OK and never receives sync.
+    device_empty_poll_skip_seconds: int = 0
     # Only these cdata tables are written to device_attendance_logs (comma-separated).
     # OPERLOG/BIODATA are ack'd without insert. Set "ATTLOG,USERINFO" while debugging sync.
     device_persist_cdata_tables: str = "ATTLOG"

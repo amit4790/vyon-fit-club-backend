@@ -87,7 +87,10 @@ class _DevicePollCache:
         key = serial_number.strip()
         with self._lock:
             self._pending_hint.discard(key)
-            self._empty_until[key] = self._now() + timedelta(seconds=max(skip_seconds, 1))
+            if skip_seconds <= 0:
+                self._empty_until.pop(key, None)
+                return
+            self._empty_until[key] = self._now() + timedelta(seconds=skip_seconds)
 
     def should_skip_empty_poll_db(self, serial_number: str) -> bool:
         key = serial_number.strip()
@@ -279,6 +282,25 @@ class PushDeviceService:
         Returns:
             Next pending DeviceCommand or None if queue is empty
         """
+        # Reclaim commands left EXECUTING without an ACK (deploy/probe/timeout).
+        stale_before = datetime.utcnow() - timedelta(minutes=2)
+        (
+            self.db.query(DeviceCommand)
+            .filter(
+                DeviceCommand.device_serial == device_serial,
+                DeviceCommand.status == CommandStatus.EXECUTING,
+                DeviceCommand.executed_at.isnot(None),
+                DeviceCommand.executed_at < stale_before,
+            )
+            .update(
+                {
+                    DeviceCommand.status: CommandStatus.PENDING,
+                    DeviceCommand.executed_at: None,
+                },
+                synchronize_session=False,
+            )
+        )
+
         command = self.db.query(DeviceCommand).filter(
             DeviceCommand.device_serial == device_serial,
             DeviceCommand.status == CommandStatus.PENDING

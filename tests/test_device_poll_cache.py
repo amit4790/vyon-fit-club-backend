@@ -97,6 +97,11 @@ class DevicePollCacheTests(unittest.TestCase):
         self.cache.mark_command_queued(sn)
         self.assertFalse(self.cache.should_skip_empty_poll_db(sn))
 
+    def test_empty_poll_skip_disabled_when_seconds_zero(self) -> None:
+        sn = "ZAM230001234"
+        self.cache.mark_empty_poll(sn, skip_seconds=0)
+        self.assertFalse(self.cache.should_skip_empty_poll_db(sn))
+
     def test_expired_last_seen_interval_requires_db(self) -> None:
         sn = "ZAM230001234"
         self.cache.note_device_persisted(sn, {"platform": "ZAM230_TFT"})

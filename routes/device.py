@@ -104,10 +104,14 @@ async def get_device_command(
     """
     Command polling endpoint.
 
-    Empty polls are answered from an in-memory skip window so Neon is not queried
-    on every device tick. Queuing a command clears that window immediately.
+    Every poll hits the DB when DEVICE_EMPTY_POLL_SKIP_SECONDS is 0 (default).
+    An in-memory empty-poll skip is unsafe on multi-instance Render because
+    command queueing on one instance cannot clear another instance's skip window.
     """
-    if device_poll_cache.should_skip_empty_poll_db(SN):
+    if (
+        settings.device_empty_poll_skip_seconds > 0
+        and device_poll_cache.should_skip_empty_poll_db(SN)
+    ):
         logger.debug(
             f"Empty-poll cache hit for device {SN}",
             extra={"device_serial": SN, "endpoint": "GET /iclock/getrequest"},
