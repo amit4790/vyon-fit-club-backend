@@ -683,6 +683,23 @@ def get_expiring_subscriptions(
     )
 
 
+@router.get("/subscriptions/expiring/export")
+def export_expiring_subscriptions(
+    days: int = Query(30, ge=1, le=90, description="Lookahead window in days"),
+    db: Session = Depends(get_db),
+) -> Response:
+    """Download Excel of all active subscriptions expiring within the window."""
+    service = SubscriptionService(db)
+    service.sync_expired_subscriptions()
+    content = service.build_expiring_subscriptions_xlsx(days=days)
+    filename = f"expiring-subscriptions-next-{days}-days.xlsx"
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.get("/subscriptions/{subscription_id:int}", response_model=SubscriptionOperationResponse)
 def get_subscription_by_id(subscription_id: int, db: Session = Depends(get_db)) -> SubscriptionOperationResponse:
     """Get a subscription record by id."""
@@ -826,6 +843,36 @@ def export_monthly_trainer_attendance(
 
     csv_text = AttendanceService(db).build_month_csv(year, month)
     filename = f"trainer-attendance-{year}-{month:02d}.csv"
+    return Response(
+        content=csv_text,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/attendance/export/daily")
+def export_daily_trainer_attendance(
+    day: str = Query(..., description="Date in YYYY-MM-DD"),
+    db: Session = Depends(get_db),
+) -> Response:
+    """Download trainer attendance CSV for a single gym-local day."""
+    from datetime import date as date_cls, timedelta
+
+    try:
+        parsed_day = date_cls.fromisoformat(day)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid date") from exc
+
+    today = date_cls.today()
+    oldest_allowed = today - timedelta(days=RETENTION_DAYS)
+    if parsed_day < oldest_allowed or parsed_day > today:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Daily export is limited to the last {RETENTION_DAYS} days",
+        )
+
+    csv_text = AttendanceService(db).build_day_csv(parsed_day)
+    filename = f"trainer-attendance-{parsed_day.isoformat()}.csv"
     return Response(
         content=csv_text,
         media_type="text/csv",

@@ -235,6 +235,38 @@ class AttendanceService:
             )
         return output.getvalue()
 
+    def build_day_csv(self, day: date) -> str:
+        """Export first check-in per trainer for one gym-local day (IST)."""
+        start, end = gym_day_bounds_utc(day)
+        punches = self.repo.list_punches(person_type="trainer", start_at=start, end_at=end)
+        trainers = self._trainer_name_map()
+
+        first_by_trainer: dict[int, AttendancePunch] = {}
+        for punch in punches:
+            if punch.person_id not in first_by_trainer:
+                first_by_trainer[punch.person_id] = punch
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(
+            ["date", "check_in_time", "trainer_id", "trainer_name", "specialization", "pin", "is_late"]
+        )
+        for person_id, punch in sorted(first_by_trainer.items(), key=lambda item: item[1].punched_at):
+            trainer = trainers.get(person_id)
+            punched_at = to_device_local(punch.punched_at)
+            writer.writerow(
+                [
+                    punched_at.date().isoformat(),
+                    punched_at.strftime("%H:%M:%S"),
+                    person_id,
+                    trainer.full_name if trainer else f"Trainer #{person_id}",
+                    trainer.specialization if trainer else "",
+                    punch.pin,
+                    "yes" if self._is_late(punch.punched_at) else "no",
+                ]
+            )
+        return output.getvalue()
+
     def purge_old_records(self) -> dict[str, int]:
         cutoff = datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)
         punches_deleted = self.repo.delete_older_than(cutoff)

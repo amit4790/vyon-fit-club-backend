@@ -55,4 +55,7 @@ def gym_month_bounds_utc(year: int, month: int) -> tuple[datetime, datetime]:
 
 
 def to_device_local(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        # DB drivers / SQLite may return naive UTC instants.
+        value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(device_zone())
