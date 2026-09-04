@@ -96,6 +96,7 @@ from services.device_service import (
     DeviceValidationError,
 )
 from services.report_service import ReportService
+from core.device_time import to_device_local
 from services.attendance_service import AttendanceService, RETENTION_DAYS
 from services.invoice_service import (
     InvalidPaymentAmountError,
@@ -762,7 +763,8 @@ def get_daily_trainer_attendance(
                 person_name=row.person_name,
                 specialization=row.specialization,
                 pin=row.pin,
-                punched_at=row.punched_at,
+                # Always expose gym-local IST so FE/export stay aligned.
+                punched_at=to_device_local(row.punched_at),
                 is_late=row.is_late,
             )
             for row in rows
@@ -790,7 +792,7 @@ def get_monthly_trainer_attendance(
                 days_present=row.days_present,
                 on_time_days=row.on_time_days,
                 late_days=row.late_days,
-                last_check_in=row.last_check_in,
+                last_check_in=to_device_local(row.last_check_in) if row.last_check_in else None,
             )
             for row in rows
         ],
