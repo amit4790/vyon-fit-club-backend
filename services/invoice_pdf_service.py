@@ -54,9 +54,9 @@ DEFAULT_GYM_INVOICE_PROFILE = GymInvoiceProfile(
     logo_text="VYON",
     gym_name="VYON Fit Club",
     tagline="Membership Invoice",
-    address="Address: 301-D, 2nd Floor, Sushant Lok",
+    address="Address: Sri Ram Complex, 2nd Floor, Sushant Lok",
     phone="Phone: +91 9625 2266 53",
-    email="Email: update@vyonfitclub.com",
+    email="Email: vyonfitclub@gmail.com",
     gstin_label="GST No.: Applied For",
     pan_label="PAN No.: Applied For",
 )
@@ -69,7 +69,7 @@ DEFAULT_RULES_AND_REGULATIONS: list[str] = [
     "Membership can be paused only in approved cases with valid supporting documents.",
     "Discounted or complimentary months cannot be paused, carried forward, or converted to cash.",
     "The management reserves the right to modify or update these terms and conditions as needed.",
-    "Liability Disclaimer: By paying this invoice or utilizing our facilities, the client acknowledges the inherent risks of physical activity and agrees that Vyon Fit Club is not liable for any personal injuries, accidents, or health complications sustained on the premises.",
+    "By paying this invoice or utilizing our facilities, the client acknowledges the inherent risks of physical activity and agrees that Vyon Fit Club is not liable for any personal injuries, accidents, or health complications sustained on the premises.",
 ]
 
 
