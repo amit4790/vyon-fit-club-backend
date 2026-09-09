@@ -57,8 +57,8 @@ DEFAULT_GYM_INVOICE_PROFILE = GymInvoiceProfile(
     address="Address: Sri Ram Complex, 2nd Floor, Sushant Lok",
     phone="Phone: +91 9625 2266 53",
     email="Email: vyonfitclub@gmail.com",
-    gstin_label="GST No.: Applied For",
-    pan_label="PAN No.: Applied For",
+    gstin_label="GST No.: 06ABCFV6317L1ZW",
+    pan_label="PAN No.: ABCFV6317L",
 )
 
 
