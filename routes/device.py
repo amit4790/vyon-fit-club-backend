@@ -104,9 +104,10 @@ async def get_device_command(
     """
     Command polling endpoint.
 
-    Every poll hits the DB when DEVICE_EMPTY_POLL_SKIP_SECONDS is 0 (default).
-    An in-memory empty-poll skip is unsafe on multi-instance Render because
-    command queueing on one instance cannot clear another instance's skip window.
+    Empty polls can skip Neon for DEVICE_EMPTY_POLL_SKIP_SECONDS (default 10).
+    Presence (last_seen) writes respect DEVICE_PRESENCE_WRITE_INTERVAL_SECONDS.
+    Queuing a command calls mark_command_queued so the same process delivers
+    immediately; cross-instance delay is at most the empty-poll window.
     """
     if (
         settings.device_empty_poll_skip_seconds > 0
@@ -121,7 +122,8 @@ async def get_device_command(
     db = SessionLocal()
     try:
         service = PushDeviceService(db)
-        service.register_or_update_device(SN, force_touch=True)
+        # Do not force_touch: getrequest is high-frequency; use presence throttle.
+        service.register_or_update_device(SN)
         command = service.get_pending_command(SN)
 
         if command:
