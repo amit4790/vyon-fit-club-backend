@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     # Keep short on multi-instance Render: queueing on one instance does not clear
     # another instance's window until it expires (worst-case command delay ≈ this value).
     # queue_command() calls mark_command_queued so the same process delivers immediately.
-    device_empty_poll_skip_seconds: int = 10
+    device_empty_poll_skip_seconds: int = 300
     # Only these cdata tables are written to device_attendance_logs (comma-separated).
     # OPERLOG/BIODATA are ack'd without insert. Set "ATTLOG,USERINFO" while debugging sync.
     device_persist_cdata_tables: str = "ATTLOG"
