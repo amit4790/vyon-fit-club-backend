@@ -464,14 +464,57 @@ class InvoicePdfService:
         info_y = header_y + header_h - 24
         stream.extend(self._cmd_text(info_x, info_y, self.gym_profile.gym_name, size=14, bold=True, color=text_dark))
         stream.extend(self._cmd_text(info_x, info_y - 15, self.gym_profile.tagline, size=8.5, color=primary))
-        stream.extend(self._cmd_text(info_x, info_y - 31, self.gym_profile.address, size=8, color=text_muted))
-        stream.extend(self._cmd_text(info_x, info_y - 44, self.gym_profile.phone, size=8, color=text_muted))
-        stream.extend(self._cmd_text(info_x, info_y - 57, self.gym_profile.email, size=8, color=text_muted))
-        stream.extend(self._cmd_text(info_x, info_y - 72, self.gym_profile.gstin_label, size=8, bold=True, color=text_dark))
+        # Business contact details
+        address_lines = self._wrap_text(self.gym_profile.address, 26)
+
+        address_y = info_y - 31
+
+        for line in address_lines[:2]:
+            stream.extend(
+                self._cmd_text(
+                    info_x,
+                    address_y,
+                    line,
+                    size=8,
+                    color=text_muted,
+                )
+            )
+            address_y -= 9
+
+        stream.extend(
+            self._cmd_text(
+                info_x,
+                address_y - 1,
+                self.gym_profile.phone,
+                size=8,
+                color=text_muted,
+            )
+        )
+
+        stream.extend(
+            self._cmd_text(
+                info_x,
+                address_y - 13,
+                self.gym_profile.email,
+                size=8,
+                color=text_muted,
+            )
+        )
+
+        stream.extend(
+            self._cmd_text(
+                info_x,
+                address_y - 26,
+                self.gym_profile.gstin_label,
+                size=8,
+                bold=True,
+                color=text_dark,
+            )
+        )
 
         meta_w = 150.0
         meta_h = 100.0
-        meta_x = margin + 246
+        meta_x = margin + 260
         meta_y = header_y + (header_h - meta_h) / 2.0
         stream.extend(self._cmd_rect(meta_x, meta_y, meta_w, meta_h, fill=panel_bg, stroke=border))
         stream.extend(self._cmd_text(meta_x + 12, meta_y + meta_h - 22, "TAX INVOICE", size=11, bold=True, color=primary))
