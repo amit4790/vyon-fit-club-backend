@@ -82,6 +82,15 @@ class AttendanceService:
             parsed.append((pin, punched_at, line[:500]))
         return parsed
 
+    @staticmethod
+    def payload_has_trainer_punches(raw_payload: str) -> bool:
+        """Pure text check, no DB. True if any ATTLOG line belongs to a trainer PIN."""
+        for pin, _punched_at, _raw_line in AttendanceService._parse_attlog_lines(raw_payload):
+            resolved = resolve_device_pin(pin)
+            if resolved and resolved[0] == "trainer":
+                return True
+        return False
+
     def ingest_attlog_payload(self, *, device_serial: str, raw_payload: str) -> int:
         """
         Parse ATTLOG text and insert trainer punches. Returns inserted count.

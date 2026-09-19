@@ -603,6 +603,25 @@ async def receive_attendance_data(
         )
         return _ok()
 
+    # Gym policy: only trainer punches are stored. ingest_attlog_payload already
+    # ignores member PINs, so a member-only upload would still cost a device
+    # lookup + raw-log INSERT + is_processed UPDATE and wake Neon for nothing.
+    # Pure text check, no DB. Fails OPEN: on any error fall through and store
+    # normally so a trainer punch can never be dropped by this optimisation.
+    # Set DEVICE_STORE_MEMBER_ATTLOG=true to keep raw logs for member punches.
+    if table == "ATTLOG" and not getattr(settings, "device_store_member_attlog", False):
+        try:
+            from services.attendance_service import AttendanceService
+
+            if not AttendanceService.payload_has_trainer_punches(raw_payload):
+                logger.debug(
+                    "ATTLOG without trainer punches acknowledged without DB access: device=%s",
+                    SN,
+                )
+                return _ok()
+        except Exception:
+            logger.exception("Trainer-punch pre-check failed; storing upload normally")
+
     request_meta = None
     if settings.device_push_log_raw:
         request_meta = {

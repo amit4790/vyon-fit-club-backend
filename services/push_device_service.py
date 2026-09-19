@@ -711,6 +711,30 @@ class PushDeviceService:
             DeviceAttendanceLog.is_processed == False
         ).order_by(DeviceAttendanceLog.uploaded_at).limit(limit).all()
 
+    def _active_device_serials(self) -> List[str]:
+        """
+        Serial numbers of active devices, as plain strings.
+
+        Selecting only the column (instead of PushDevice objects) means nothing
+        can be expired by a later commit, so looping over the result never
+        triggers per-device reload SELECTs, and large columns such as
+        registration_payload are not loaded.
+        """
+        rows = self.db.query(PushDevice.serial_number).filter(
+            PushDevice.is_active == True
+        ).all()
+        return [row[0] for row in rows]
+
+    def _commit_and_mark(self, serials: List[str]) -> None:
+        """One commit for all staged commands, then hint the pollers (post-commit)."""
+        try:
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+        for serial in serials:
+            device_poll_cache.mark_command_queued(serial)
+
     def sync_member_to_devices(
         self,
         member_id: int,
@@ -725,25 +749,24 @@ class PushDeviceService:
         Called when a member is created or updated in VYON.
         Device PIN is the VYON member.id.
         privilege: 0 = normal (face/access enabled), 1 = inactive (access disabled).
+
+        All commands (and the member's pending flag) are committed once.
         """
         from core.device_pins import DEVICE_PRIVILEGE_INACTIVE, DEVICE_PRIVILEGE_NORMAL
 
         if privilege not in {DEVICE_PRIVILEGE_NORMAL, DEVICE_PRIVILEGE_INACTIVE}:
             privilege = DEVICE_PRIVILEGE_NORMAL
 
-        devices = self.db.query(PushDevice).filter(
-            PushDevice.is_active == True
-        ).all()
-
-        if not devices:
+        serials = self._active_device_serials()
+        if not serials:
             logger.warning(
                 "No active PUSH devices found for member sync",
                 extra={"member_id": member_id}
             )
             return []
 
-        commands = []
-        for index, device in enumerate(devices):
+        commands: List[DeviceCommand] = []
+        for index, serial in enumerate(serials):
             command_id = self._next_command_id(member_id=member_id, salt=index)
             command_str = UserSyncCommand.build_update_user_command(
                 command_id=command_id,
@@ -753,31 +776,31 @@ class PushDeviceService:
                 password="",
                 card=card_number or "",
             )
-            device_command = self.queue_command(
-                device_serial=device.serial_number,
-                command_id=str(command_id),
-                command=command_str,
-                max_retries=3
+            commands.append(
+                self.queue_command(
+                    device_serial=serial,
+                    command_id=str(command_id),
+                    command=command_str,
+                    max_retries=3,
+                    commit=False,
+                )
             )
-            commands.append(device_command)
             logger.info(
-                f"Queued user sync command for member {member_id} to device {device.serial_number}",
+                f"Queued user sync command for member {member_id} to device {serial}",
                 extra={
                     "member_id": member_id,
-                    "device_serial": device.serial_number,
+                    "device_serial": serial,
                     "command_id": command_id,
                     "privilege": privilege,
                 },
             )
 
-        if commands:
-            from models import Member
+        from models import Member
 
-            member = self.db.query(Member).filter(Member.id == member_id).first()
-            if member:
-                self._mark_member_sync_pending(member)
-                self.db.commit()
-
+        member = self.db.query(Member).filter(Member.id == member_id).first()
+        if member:
+            self._mark_member_sync_pending(member)
+        self._commit_and_mark(serials)
         return commands
 
     def set_member_access_on_devices(
@@ -796,8 +819,8 @@ class PushDeviceService:
         from core.device_pins import DEVICE_PRIVILEGE_INACTIVE, DEVICE_PRIVILEGE_NORMAL
 
         privilege = DEVICE_PRIVILEGE_NORMAL if enabled else DEVICE_PRIVILEGE_INACTIVE
-        devices = self.db.query(PushDevice).filter(PushDevice.is_active == True).all()
-        if not devices:
+        serials = self._active_device_serials()
+        if not serials:
             logger.warning(
                 "No active PUSH devices found for member access update",
                 extra={"member_id": member_id, "enabled": enabled},
@@ -805,7 +828,7 @@ class PushDeviceService:
             return []
 
         commands: List[DeviceCommand] = []
-        for index, device in enumerate(devices):
+        for index, serial in enumerate(serials):
             command_id = self._next_command_id(member_id=member_id, salt=index + 900)
             command_str = UserSyncCommand.build_update_userinfo_command(
                 command_id=command_id,
@@ -816,40 +839,39 @@ class PushDeviceService:
             )
             commands.append(
                 self.queue_command(
-                    device_serial=device.serial_number,
+                    device_serial=serial,
                     command_id=str(command_id),
                     command=command_str,
                     max_retries=3,
+                    commit=False,
                 )
             )
             logger.info(
                 f"Queued member access {'enable' if enabled else 'disable'} "
-                f"for member {member_id} on {device.serial_number} (Pri={privilege})",
+                f"for member {member_id} on {serial} (Pri={privilege})",
                 extra={
                     "member_id": member_id,
-                    "device_serial": device.serial_number,
+                    "device_serial": serial,
                     "enabled": enabled,
                     "privilege": privilege,
                     "command_id": command_id,
                 },
             )
 
-        if commands:
-            from models import Member
+        from models import Member
 
-            member = self.db.query(Member).filter(Member.id == member_id).first()
-            if member:
-                self._mark_member_sync_pending(member)
-                self.db.commit()
-
+        member = self.db.query(Member).filter(Member.id == member_id).first()
+        if member:
+            self._mark_member_sync_pending(member)
+        self._commit_and_mark(serials)
         return commands
 
     def sync_trainer_to_devices(self, trainer_id: int, trainer_name: str) -> List[DeviceCommand]:
         """Queue USERINFO for a trainer using PIN = 50000 + trainer_id."""
         from core.device_pins import trainer_pin
 
-        devices = self.db.query(PushDevice).filter(PushDevice.is_active == True).all()
-        if not devices:
+        serials = self._active_device_serials()
+        if not serials:
             logger.warning(
                 "No active PUSH devices found for trainer sync",
                 extra={"trainer_id": trainer_id},
@@ -858,7 +880,7 @@ class PushDeviceService:
 
         pin = trainer_pin(trainer_id)
         commands: List[DeviceCommand] = []
-        for index, device in enumerate(devices):
+        for index, serial in enumerate(serials):
             command_id = self._next_command_id(member_id=pin, salt=index + 700)
             command_str = UserSyncCommand.build_update_userinfo_command(
                 command_id=command_id,
@@ -869,10 +891,11 @@ class PushDeviceService:
             )
             commands.append(
                 self.queue_command(
-                    device_serial=device.serial_number,
+                    device_serial=serial,
                     command_id=str(command_id),
                     command=command_str,
                     max_retries=3,
+                    commit=False,
                 )
             )
             logger.info(
@@ -880,23 +903,24 @@ class PushDeviceService:
                 extra={
                     "trainer_id": trainer_id,
                     "pin": pin,
-                    "device_serial": device.serial_number,
+                    "device_serial": serial,
                     "command_id": command_id,
                 },
             )
+        self._commit_and_mark(serials)
         return commands
 
     def remove_trainer_from_devices(self, trainer_id: int) -> List[DeviceCommand]:
         """Queue DELETE USERINFO for a trainer PIN."""
         from core.device_pins import trainer_pin
 
-        devices = self.db.query(PushDevice).filter(PushDevice.is_active == True).all()
-        if not devices:
+        serials = self._active_device_serials()
+        if not serials:
             return []
 
         pin = trainer_pin(trainer_id)
         commands: List[DeviceCommand] = []
-        for index, device in enumerate(devices):
+        for index, serial in enumerate(serials):
             command_id = self._next_command_id(member_id=pin, salt=index + 800)
             command_str = UserSyncCommand.build_delete_user_command(
                 command_id=command_id,
@@ -904,12 +928,14 @@ class PushDeviceService:
             )
             commands.append(
                 self.queue_command(
-                    device_serial=device.serial_number,
+                    device_serial=serial,
                     command_id=str(command_id),
                     command=command_str,
                     max_retries=3,
+                    commit=False,
                 )
             )
+        self._commit_and_mark(serials)
         return commands
 
     def remove_member_from_devices(self, member_id: int) -> List[DeviceCommand]:
@@ -919,40 +945,40 @@ class PushDeviceService:
         Called when a member is deleted in VYON.
         Device PIN is the VYON member.id.
         """
-        devices = self.db.query(PushDevice).filter(
-            PushDevice.is_active == True
-        ).all()
-
-        if not devices:
+        serials = self._active_device_serials()
+        if not serials:
             logger.warning(
                 "No active PUSH devices found for member delete sync",
                 extra={"member_id": member_id},
             )
             return []
 
-        commands = []
-        for index, device in enumerate(devices):
+        commands: List[DeviceCommand] = []
+        for index, serial in enumerate(serials):
             command_id = self._next_command_id(member_id=member_id, salt=index + 500)
             command_str = UserSyncCommand.build_delete_user_command(
                 command_id=command_id,
                 pin=str(member_id),
             )
-            device_command = self.queue_command(
-                device_serial=device.serial_number,
-                command_id=str(command_id),
-                command=command_str,
-                max_retries=3,
+            commands.append(
+                self.queue_command(
+                    device_serial=serial,
+                    command_id=str(command_id),
+                    command=command_str,
+                    max_retries=3,
+                    commit=False,
+                )
             )
-            commands.append(device_command)
             logger.info(
-                f"Queued user delete command for member {member_id} to device {device.serial_number}",
+                f"Queued user delete command for member {member_id} to device {serial}",
                 extra={
                     "member_id": member_id,
-                    "device_serial": device.serial_number,
+                    "device_serial": serial,
                     "command_id": command_id,
                 },
             )
 
+        self._commit_and_mark(serials)
         return commands
 
     def resync_all_members_to_device(self, device_sn: str) -> dict[str, Any]:
