@@ -17,6 +17,16 @@ Protocol Documentation:
 - Attendance uses ATTLOG format with tab-separated fields
 
 Reference: ZKTeco PUSH SDK / iClock Protocol Specification
+
+Neon-friendly notes:
+- No session.refresh() after commits. INSERT ... RETURNING already populates ids
+  and server defaults; refresh() only added extra SELECT round trips (and
+  re-read large columns such as raw_payload). Device routes open their sessions
+  with expire_on_commit=False so objects stay readable after commit.
+- Command hints (`mark_command_queued`) are only set AFTER the row is committed,
+  and `mark_empty_poll` refuses to clear a hint if a command was queued while
+  the poll was querying (queue-version check). Together these stop the
+  "command waits out the whole skip window" races.
 """
 
 import logging
@@ -32,16 +42,24 @@ from core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Commands left EXECUTING without an ACK for this long are handed out again.
+STALE_EXECUTING_AFTER = timedelta(minutes=2)
+
 
 class _DevicePollCache:
     """
     Process-local cache so frequent ZKTeco polls do not keep Neon awake.
 
-    Single Render instance assumed — this cache is not shared across workers.
+    Single Render instance assumed - this cache is not shared across workers.
+    All methods are thread-safe (device routes run in FastAPI's threadpool).
 
     - empty_until: after a poll finds no pending commands, skip DB until this time
     - pending_hint: serials known to have (or just received) queued commands
+    - queue_version: per-serial counter bumped on every committed queue; lets an
+      in-flight poll detect that a command arrived while it was querying
     - last_seen_written_at: when we last successfully persisted last_seen
+    - last_contact: when the device last called ANY endpoint (memory only; use
+      this for live online/offline status instead of the DB last_seen column)
     - device_metadata: last successfully persisted identity fields per serial
     """
 
@@ -51,7 +69,9 @@ class _DevicePollCache:
         self._lock = threading.Lock()
         self._empty_until: dict[str, datetime] = {}
         self._pending_hint: set[str] = set()
+        self._queue_version: dict[str, int] = {}
         self._last_seen_written_at: dict[str, datetime] = {}
+        self._last_contact: dict[str, datetime] = {}
         self._device_metadata: dict[str, dict[str, str | None]] = {}
 
     @staticmethod
@@ -77,15 +97,40 @@ class _DevicePollCache:
             "device_name": device.device_name,
         }
 
+    # -- command queue hints -------------------------------------------------
+
     def mark_command_queued(self, serial_number: str) -> None:
+        """
+        Call only AFTER the DeviceCommand row has been committed.
+
+        Sets the pending hint, clears any empty-poll skip window and bumps the
+        queue version so a poll that was already in flight cannot overwrite the
+        hint with an empty-poll skip.
+        """
         key = serial_number.strip()
         with self._lock:
             self._pending_hint.add(key)
             self._empty_until.pop(key, None)
+            self._queue_version[key] = self._queue_version.get(key, 0) + 1
 
-    def mark_empty_poll(self, serial_number: str, *, skip_seconds: int) -> None:
+    def queue_version(self, serial_number: str) -> int:
+        """Read BEFORE opening a DB session, pass to mark_empty_poll afterwards."""
+        with self._lock:
+            return self._queue_version.get(serial_number.strip(), 0)
+
+    def mark_empty_poll(
+        self,
+        serial_number: str,
+        *,
+        skip_seconds: int,
+        seen_version: Optional[int] = None,
+    ) -> None:
         key = serial_number.strip()
         with self._lock:
+            if seen_version is not None and self._queue_version.get(key, 0) != seen_version:
+                # A command was committed while this poll was querying, so the
+                # "no commands" result is stale. Keep the hint; next poll hits the DB.
+                return
             self._pending_hint.discard(key)
             if skip_seconds <= 0:
                 self._empty_until.pop(key, None)
@@ -105,6 +150,18 @@ class _DevicePollCache:
                 return False
             return True
 
+    # -- contact tracking (memory only, never touches the DB) ---------------
+
+    def note_contact(self, serial_number: str) -> None:
+        with self._lock:
+            self._last_contact[serial_number.strip()] = self._now()
+
+    def last_contact(self, serial_number: str) -> Optional[datetime]:
+        with self._lock:
+            return self._last_contact.get(serial_number.strip())
+
+    # -- presence write throttle --------------------------------------------
+
     def is_within_last_seen_interval(self, serial_number: str, *, interval_seconds: int) -> bool:
         key = serial_number.strip()
         with self._lock:
@@ -114,7 +171,7 @@ class _DevicePollCache:
             return (self._now() - previous) < timedelta(seconds=max(interval_seconds, 1))
 
     def needs_last_seen_write(self, serial_number: str, *, interval_seconds: int) -> bool:
-        """Peek only — does not mutate cache. Safe to call before a DB commit."""
+        """Peek only - does not mutate cache. Safe to call before a DB commit."""
         return not self.is_within_last_seen_interval(
             serial_number,
             interval_seconds=interval_seconds,
@@ -179,6 +236,11 @@ class PushDeviceService:
 
     def __init__(self, db: Session):
         self.db = db
+        # Set by get_pending_command when it finds nothing to send: True if some
+        # command for the device is still EXECUTING (dispatched, ACK not seen yet).
+        # The route uses it to pick a short empty-poll window so a lost ACK is
+        # reclaimed in minutes instead of waiting out the full skip window.
+        self.has_executing_outstanding: bool = False
 
     def register_or_update_device(
         self,
@@ -224,22 +286,22 @@ class PushDeviceService:
                     metadata_changed = True
 
             if should_touch or metadata_changed:
-                device.last_seen = datetime.utcnow()
+                now = datetime.now(timezone.utc)
+                device.last_seen = now
+                # Snapshot BEFORE commit: attributes may be expired afterwards and
+                # reading them would cost an extra SELECT.
+                meta = _DevicePollCache.persisted_meta_from_device(device)
                 try:
                     self.db.commit()
-                    self.db.refresh(device)
                 except Exception:
                     self.db.rollback()
                     raise
-                device_poll_cache.note_device_persisted(
-                    serial_number,
-                    _DevicePollCache.persisted_meta_from_device(device),
-                )
+                device_poll_cache.note_device_persisted(serial_number, meta)
                 logger.debug(
                     f"Device presence persisted: {serial_number}",
                     extra={
                         "device_serial": serial_number,
-                        "last_seen": device.last_seen.isoformat() if device.last_seen else None,
+                        "last_seen": now.isoformat(),
                         "metadata_changed": metadata_changed,
                     },
                 )
@@ -254,16 +316,13 @@ class PushDeviceService:
             registration_payload=str(device_info) if device_info else None,
         )
         self.db.add(device)
+        meta = _DevicePollCache.persisted_meta_from_device(device)
         try:
             self.db.commit()
-            self.db.refresh(device)
         except Exception:
             self.db.rollback()
             raise
-        device_poll_cache.note_device_persisted(
-            serial_number,
-            _DevicePollCache.persisted_meta_from_device(device),
-        )
+        device_poll_cache.note_device_persisted(serial_number, meta)
         logger.info(
             f"Device registered: {serial_number}",
             extra={"device_serial": serial_number, "device_info": device_info},
@@ -282,8 +341,10 @@ class PushDeviceService:
         Returns:
             Next pending DeviceCommand or None if queue is empty
         """
+        self.has_executing_outstanding = False
+
         # Reclaim commands left EXECUTING without an ACK (deploy/probe/timeout).
-        stale_before = datetime.utcnow() - timedelta(minutes=2)
+        stale_before = datetime.now(timezone.utc) - STALE_EXECUTING_AFTER
         (
             self.db.query(DeviceCommand)
             .filter(
@@ -307,22 +368,37 @@ class PushDeviceService:
         ).order_by(DeviceCommand.created_at).first()
 
         if command:
+            # Snapshot for logging before commit (attributes may expire on commit).
+            cmd_id = command.command_id
+            cmd_text = command.command
+
             # Mark as executing
             command.status = CommandStatus.EXECUTING
-            command.executed_at = datetime.utcnow()
+            command.executed_at = datetime.now(timezone.utc)
             self.db.commit()
-            self.db.refresh(command)
-            
+
             logger.info(
-                f"Command dispatched: {command.command_id} to device {device_serial}",
+                f"Command dispatched: {cmd_id} to device {device_serial}",
                 extra={
                     "device_serial": device_serial,
-                    "command_id": command.command_id,
-                    "command": command.command
+                    "command_id": cmd_id,
+                    "command": cmd_text,
                 }
             )
+            return command
 
-        return command
+        # Nothing to send. Is something still awaiting its ACK? (one cheap
+        # indexed query, only reached on polls that actually hit the DB)
+        self.has_executing_outstanding = (
+            self.db.query(DeviceCommand.id)
+            .filter(
+                DeviceCommand.device_serial == device_serial,
+                DeviceCommand.status == CommandStatus.EXECUTING,
+            )
+            .first()
+            is not None
+        )
+        return None
 
     def acknowledge_command(
         self,
@@ -360,24 +436,24 @@ class PushDeviceService:
             )
             return None
 
+        final_status = CommandStatus.COMPLETED if success else CommandStatus.FAILED
         command.response = response_data
-        command.status = CommandStatus.COMPLETED if success else CommandStatus.FAILED
-        command.completed_at = datetime.utcnow()
-        
+        command.status = final_status
+        command.completed_at = datetime.now(timezone.utc)
+
         if not success:
             command.error_message = response_data
 
         self._apply_member_sync_status_from_ack(command, success=success)
 
         self.db.commit()
-        self.db.refresh(command)
 
         logger.info(
             f"Command acknowledged: {command_id} - {'SUCCESS' if success else 'FAILED'}",
             extra={
                 "device_serial": device_serial,
                 "command_id": command_id,
-                "status": command.status.value,
+                "status": final_status.value,
                 "response": response_data
             }
         )
@@ -442,7 +518,10 @@ class PushDeviceService:
             command_id: Unique command identifier
             command: Command string in iClock format
             max_retries: Maximum retry attempts
-            commit: When False, only stage the row (for bulk queue)
+            commit: When False, only stage the row (for bulk queue). The CALLER
+                must then call device_poll_cache.mark_command_queued(serial)
+                after its own commit; marking before the commit would let a
+                concurrent poll see nothing, then wipe the hint.
 
         Returns:
             Created DeviceCommand instance
@@ -457,11 +536,10 @@ class PushDeviceService:
         self.db.add(device_command)
         if commit:
             self.db.commit()
-            self.db.refresh(device_command)
+            # Only after a successful commit is the command visible to pollers.
+            device_poll_cache.mark_command_queued(device_serial)
         else:
             self.db.flush()
-
-        device_poll_cache.mark_command_queued(device_serial)
 
         logger.info(
             f"Command queued: {command_id} for device {device_serial}",
@@ -508,15 +586,20 @@ class PushDeviceService:
         - tables not in ``settings.device_persist_cdata_tables`` (default: ATTLOG only;
           OPERLOG/BIODATA are ack'd without insert)
 
-        Emptiness is detected with ``not raw_payload.strip()`` only — never with
+        Emptiness is detected with ``not raw_payload.strip()`` only - never with
         ``record_count == 0`` alone. Bare ATTLOG lines without an ``ATTLOG:``
         prefix can under-count depending on the counter, but still contain punches.
+
+        Note: no refresh() after the commit. The INSERT ... RETURNING already
+        populated id / uploaded_at / created_at. Use a session created with
+        expire_on_commit=False (as the device routes do) so the returned object
+        stays readable without an extra SELECT.
         """
         normalized_table = (table_name or "").strip().upper()
         record_count = self._count_table_records(raw_payload, normalized_table)
         persist_tables = settings.device_persist_cdata_table_set
 
-        # Skip persistence only for blank payloads. Do not use record_count alone —
+        # Skip persistence only for blank payloads. Do not use record_count alone -
         # ATTLOG rows may omit the "ATTLOG:" prefix and still contain punches.
         if not raw_payload.strip():
             logger.info(
@@ -554,7 +637,6 @@ class PushDeviceService:
         )
         self.db.add(attendance_log)
         self.db.commit()
-        self.db.refresh(attendance_log)
 
         log_message = (
             f"Device table uploaded: table={normalized_table or 'UNKNOWN'} "
@@ -617,10 +699,10 @@ class PushDeviceService:
         query = self.db.query(DeviceCommand).filter(
             DeviceCommand.device_serial == device_serial
         )
-        
+
         if status:
             query = query.filter(DeviceCommand.status == status)
-        
+
         return query.order_by(desc(DeviceCommand.created_at)).limit(limit).all()
 
     def get_unprocessed_attendance(self, limit: int = 100) -> List[DeviceAttendanceLog]:
@@ -639,7 +721,7 @@ class PushDeviceService:
     ) -> List[DeviceCommand]:
         """
         Queue user add/update commands for all active PUSH devices.
-        
+
         Called when a member is created or updated in VYON.
         Device PIN is the VYON member.id.
         privilege: 0 = normal (face/access enabled), 1 = inactive (access disabled).
@@ -652,14 +734,14 @@ class PushDeviceService:
         devices = self.db.query(PushDevice).filter(
             PushDevice.is_active == True
         ).all()
-        
+
         if not devices:
             logger.warning(
                 "No active PUSH devices found for member sync",
                 extra={"member_id": member_id}
             )
             return []
-        
+
         commands = []
         for index, device in enumerate(devices):
             command_id = self._next_command_id(member_id=member_id, salt=index)
@@ -833,7 +915,7 @@ class PushDeviceService:
     def remove_member_from_devices(self, member_id: int) -> List[DeviceCommand]:
         """
         Queue user delete commands for all active PUSH devices.
-        
+
         Called when a member is deleted in VYON.
         Device PIN is the VYON member.id.
         """
@@ -886,6 +968,9 @@ class PushDeviceService:
         if not device or not device.is_active:
             raise DeviceNotRegisteredError(f"Device not found or inactive: {device_sn}")
 
+        # Read once: attributes may expire on commit.
+        device_serial = device.serial_number
+
         members = (
             self.db.query(Member)
             .filter(
@@ -902,7 +987,7 @@ class PushDeviceService:
                 queued.extend(
                     self._queue_member_sync_commands(
                         member=member,
-                        device_serial=device.serial_number,
+                        device_serial=device_serial,
                         salt_base=index * 10,
                         commit=False,
                     )
@@ -912,6 +997,10 @@ class PushDeviceService:
         except Exception:
             self.db.rollback()
             raise
+
+        # Rows are committed and visible to pollers only now, so hint only now.
+        if queued:
+            device_poll_cache.mark_command_queued(device_serial)
 
         logger.info(
             "Bulk device re-sync queued",
@@ -950,6 +1039,7 @@ class PushDeviceService:
         if not member:
             raise MemberSyncNotFoundError(f"Member not found: {user_id}")
 
+        # commit=True: each queue_command commits and marks the device itself.
         queued = self._queue_member_sync_commands(
             member=member,
             device_serial=device.serial_number,
@@ -982,7 +1072,12 @@ class PushDeviceService:
         salt_base: int,
         commit: bool = True,
     ) -> List[DeviceCommand]:
-        """Queue USERINFO then optional BIOPHOTO for one member, in order."""
+        """
+        Queue USERINFO then optional BIOPHOTO for one member, in order.
+
+        With commit=False the rows are only staged; the caller must commit and
+        then call device_poll_cache.mark_command_queued(device_serial).
+        """
         commands: List[DeviceCommand] = []
         passwd = str(getattr(member, "pin", None) or "")
         member_name = getattr(member, "full_name", None) or getattr(member, "name", "") or ""
@@ -1035,7 +1130,7 @@ class PushDeviceService:
     @staticmethod
     def _next_command_id(*, member_id: int, salt: int = 0) -> int:
         """Generate a unique integer command ID within 32-bit signed range."""
-        base = int(datetime.utcnow().timestamp() * 1000) % 2000000000
+        base = int(datetime.now(timezone.utc).timestamp() * 1000) % 2000000000
         return (base + (member_id * 17) + salt) % 2147483647 or 1
 
 
@@ -1051,7 +1146,7 @@ class MemberSyncNotFoundError(Exception):
 class UserSyncCommand:
     """
     User synchronization command builders for ZKTeco PUSH / ADMS protocol.
-    
+
     Formats:
     C:<id>:DATA USER PIN=31\tName=Jasleen Kaur\tPri=0\tGroup=1
     C:<id>:DATA UPDATE USERINFO PIN=31\tName=Jasleen Kaur\tPri=0\tPasswd=
@@ -1071,7 +1166,7 @@ class UserSyncCommand:
     ) -> str:
         """
         Build DATA USER command for adding/updating user on device.
-        
+
         PIN on device = VYON member.id
         """
         fields = [

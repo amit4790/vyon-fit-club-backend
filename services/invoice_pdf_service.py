@@ -54,7 +54,7 @@ DEFAULT_GYM_INVOICE_PROFILE = GymInvoiceProfile(
     logo_text="VYON",
     gym_name="VYON Fit Club",
     tagline="Membership Invoice",
-    address="Address: Sri Ram Complex, 2nd Floor, Sushant Lok",
+    address="Address: Sri Ram Complex, 2nd Floor, Sushant Lok C Block",
     phone="Phone: +91 9625 2266 53",
     email="Email: vyonfitclub@gmail.com",
     gstin_label="GST No.: 06ABCFV6317L1ZW",
@@ -465,11 +465,11 @@ class InvoicePdfService:
         stream.extend(self._cmd_text(info_x, info_y, self.gym_profile.gym_name, size=14, bold=True, color=text_dark))
         stream.extend(self._cmd_text(info_x, info_y - 15, self.gym_profile.tagline, size=8.5, color=primary))
         # Business contact details
-        address_lines = self._wrap_text(self.gym_profile.address, 26)
+        address_lines = self._wrap_text(self.gym_profile.address, 32)
 
         address_y = info_y - 31
 
-        for line in address_lines[:2]:
+        for line in address_lines[:3]:
             stream.extend(
                 self._cmd_text(
                     info_x,
