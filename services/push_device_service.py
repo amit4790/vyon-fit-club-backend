@@ -31,7 +31,9 @@ Neon-friendly notes:
 
 import logging
 import re
+import secrets
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
@@ -1153,11 +1155,42 @@ class PushDeviceService:
 
         return commands
 
+    def _next_command_id(self, *, member_id: int = 0, salt: int = 0) -> int:
+        """
+        Allocate a unique integer command ID within the 32-bit signed range.
+
+        Older formula ``(ms % 2e9) + member_id*17 + salt`` was deterministic and
+        collided with historical ``device_commands.command_id`` rows (same-ms
+        retries, and after the ms window wrapped). Prefer high-entropy IDs and
+        verify against both the DB and unflushed session rows.
+        """
+        for _ in range(16):
+            candidate = self._generate_command_id(member_id=member_id, salt=salt)
+            cid = str(candidate)
+            if any(
+                isinstance(obj, DeviceCommand) and obj.command_id == cid
+                for obj in self.db.new
+            ):
+                continue
+            exists = (
+                self.db.query(DeviceCommand.command_id)
+                .filter(DeviceCommand.command_id == cid)
+                .first()
+            )
+            if exists is None:
+                return candidate
+        raise RuntimeError("Unable to allocate unique device_commands.command_id")
+
     @staticmethod
-    def _next_command_id(*, member_id: int, salt: int = 0) -> int:
-        """Generate a unique integer command ID within 32-bit signed range."""
-        base = int(datetime.now(timezone.utc).timestamp() * 1000) % 2000000000
-        return (base + (member_id * 17) + salt) % 2147483647 or 1
+    def _generate_command_id(*, member_id: int = 0, salt: int = 0) -> int:
+        """High-entropy positive int for ZKTeco ``C:<id>:...`` command lines."""
+        mixed = (
+            time.time_ns()
+            ^ ((member_id & 0xFFFF) << 16)
+            ^ (salt & 0xFFFF)
+            ^ secrets.randbits(31)
+        ) & 0x7FFFFFFF
+        return mixed % 2147483647 or 1
 
 
 class DeviceNotRegisteredError(Exception):
