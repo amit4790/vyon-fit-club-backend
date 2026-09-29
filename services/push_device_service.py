@@ -725,7 +725,8 @@ class PushDeviceService:
         rows = self.db.query(PushDevice.serial_number).filter(
             PushDevice.is_active == True
         ).all()
-        return [row[0] for row in rows]
+        excluded = settings.device_push_exclude_serial_set
+        return [row[0] for row in rows if row[0] not in excluded]
 
     def _commit_and_mark(self, serials: List[str]) -> None:
         """One commit for all staged commands, then hint the pollers (post-commit)."""
@@ -868,8 +869,14 @@ class PushDeviceService:
         self._commit_and_mark(serials)
         return commands
 
-    def sync_trainer_to_devices(self, trainer_id: int, trainer_name: str) -> List[DeviceCommand]:
-        """Queue USERINFO for a trainer using PIN = 50000 + trainer_id."""
+    def sync_trainer_to_devices(
+        self, trainer_id: int, trainer_name: str
+    ) -> tuple[List[DeviceCommand], int]:
+        """Queue USERINFO for a trainer using PIN = 50000 + trainer_id.
+
+        Returns (queued commands, per-device failure count). Each device is
+        committed independently so one bad serial does not roll back others.
+        """
         from core.device_pins import trainer_pin
 
         serials = self._active_device_serials()
@@ -878,39 +885,51 @@ class PushDeviceService:
                 "No active PUSH devices found for trainer sync",
                 extra={"trainer_id": trainer_id},
             )
-            return []
+            return [], 0
 
         pin = trainer_pin(trainer_id)
         commands: List[DeviceCommand] = []
+        device_failures = 0
         for index, serial in enumerate(serials):
-            command_id = self._next_command_id(member_id=pin, salt=index + 700)
-            command_str = UserSyncCommand.build_update_userinfo_command(
-                command_id=command_id,
-                pin=str(pin),
-                name=trainer_name,
-                privilege=0,
-                password="",
-            )
-            commands.append(
-                self.queue_command(
-                    device_serial=serial,
-                    command_id=str(command_id),
-                    command=command_str,
-                    max_retries=3,
-                    commit=False,
+            try:
+                command_id = self._next_command_id(member_id=pin, salt=index + 700)
+                command_str = UserSyncCommand.build_update_userinfo_command(
+                    command_id=command_id,
+                    pin=str(pin),
+                    name=trainer_name,
+                    privilege=0,
+                    password="",
                 )
-            )
-            logger.info(
-                f"Queued trainer sync command for trainer {trainer_id} pin={pin}",
-                extra={
-                    "trainer_id": trainer_id,
-                    "pin": pin,
-                    "device_serial": serial,
-                    "command_id": command_id,
-                },
-            )
-        self._commit_and_mark(serials)
-        return commands
+                commands.append(
+                    self.queue_command(
+                        device_serial=serial,
+                        command_id=str(command_id),
+                        command=command_str,
+                        max_retries=3,
+                        commit=True,
+                    )
+                )
+                logger.info(
+                    f"Queued trainer sync command for trainer {trainer_id} pin={pin}",
+                    extra={
+                        "trainer_id": trainer_id,
+                        "pin": pin,
+                        "device_serial": serial,
+                        "command_id": command_id,
+                    },
+                )
+            except Exception:
+                self.db.rollback()
+                device_failures += 1
+                logger.exception(
+                    "Failed to queue trainer sync for device",
+                    extra={
+                        "trainer_id": trainer_id,
+                        "pin": pin,
+                        "device_serial": serial,
+                    },
+                )
+        return commands, device_failures
 
     def remove_trainer_from_devices(self, trainer_id: int) -> List[DeviceCommand]:
         """Queue DELETE USERINFO for a trainer PIN."""

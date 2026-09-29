@@ -1058,6 +1058,8 @@ def sync_trainers_to_devices(db: Session = Depends(get_db)) -> TrainerDeviceSync
         message="Active trainers queued for device sync",
         trainers_queued=result["trainers_queued"],
         commands_queued=result["commands_queued"],
+        trainers_failed=result.get("trainers_failed", 0),
+        command_failures=result.get("command_failures", 0),
     )
 
 

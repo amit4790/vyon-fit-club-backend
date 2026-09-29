@@ -57,8 +57,8 @@ def test_sync_trainer_twice_does_not_raise_unique_violation(db: Session):
     db.commit()
 
     service = PushDeviceService(db)
-    first = service.sync_trainer_to_devices(trainer_id=1, trainer_name="Nishant Pawar")
-    second = service.sync_trainer_to_devices(trainer_id=1, trainer_name="Nishant Pawar")
+    first, _ = service.sync_trainer_to_devices(trainer_id=1, trainer_name="Nishant Pawar")
+    second, _ = service.sync_trainer_to_devices(trainer_id=1, trainer_name="Nishant Pawar")
 
     assert first
     assert second

@@ -75,3 +75,5 @@ class TrainerDeviceSyncResponse(BaseModel):
     message: str
     trainers_queued: int
     commands_queued: int
+    trainers_failed: int = 0
+    command_failures: int = 0

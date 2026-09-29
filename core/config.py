@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     # another instance's window until it expires (worst-case command delay ≈ this value).
     # queue_command() calls mark_command_queued so the same process delivers immediately.
     device_empty_poll_skip_seconds: int = 300
+    # Comma-separated push_devices.serial_number values to skip when queueing sync
+    # commands (e.g. lab placeholders TEST, TESTPROBE). Real gym device still syncs.
+    device_push_exclude_serials: str = ""
     # Only these cdata tables are written to device_attendance_logs (comma-separated).
     # OPERLOG/BIODATA are ack'd without insert. Set "ATTLOG,USERINFO" while debugging sync.
     device_persist_cdata_tables: str = "ATTLOG"
@@ -108,6 +111,15 @@ class Settings(BaseSettings):
         return {
             part.strip().upper()
             for part in self.device_persist_cdata_tables.split(",")
+            if part.strip()
+        }
+
+    @property
+    def device_push_exclude_serial_set(self) -> set[str]:
+        """Serial numbers excluded from member/trainer device command queueing."""
+        return {
+            part.strip()
+            for part in self.device_push_exclude_serials.split(",")
             if part.strip()
         }
 

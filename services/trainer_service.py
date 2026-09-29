@@ -83,7 +83,9 @@ class TrainerService:
             if settings.device_push_enabled and trainer.is_active:
                 try:
                     push = PushDeviceService(self.db)
-                    commands = push.sync_trainer_to_devices(trainer.id, trainer.full_name)
+                    commands, _failures = push.sync_trainer_to_devices(
+                        trainer.id, trainer.full_name
+                    )
                     logger.info(
                         "Queued trainer device sync",
                         extra={"trainer_id": trainer.id, "command_count": len(commands)},
@@ -138,7 +140,7 @@ class TrainerService:
                 push = PushDeviceService(self.db)
                 try:
                     if trainer.is_active and (name_changed or not was_active):
-                        push.sync_trainer_to_devices(trainer.id, trainer.full_name)
+                        push.sync_trainer_to_devices(trainer.id, trainer.full_name)[0]
                     elif was_active and not trainer.is_active:
                         push.remove_trainer_from_devices(trainer.id)
                 except Exception:
@@ -155,15 +157,43 @@ class TrainerService:
     def sync_all_active_trainers_to_devices(self) -> dict[str, int]:
         """Queue USERINFO for every active trainer (PIN = 50000 + id)."""
         if not settings.device_push_enabled:
-            return {"trainers_queued": 0, "commands_queued": 0}
+            return {
+                "trainers_queued": 0,
+                "commands_queued": 0,
+                "trainers_failed": 0,
+                "command_failures": 0,
+            }
 
         trainers = [trainer for trainer in self.repository.list_trainers() if trainer.is_active]
         push = PushDeviceService(self.db)
         commands_queued = 0
+        trainers_queued = 0
+        trainers_failed = 0
+        command_failures = 0
         for trainer in trainers:
-            commands = push.sync_trainer_to_devices(trainer.id, trainer.full_name)
-            commands_queued += len(commands)
-        return {"trainers_queued": len(trainers), "commands_queued": commands_queued}
+            try:
+                commands, failures = push.sync_trainer_to_devices(
+                    trainer.id, trainer.full_name
+                )
+                commands_queued += len(commands)
+                command_failures += failures
+                if commands:
+                    trainers_queued += 1
+                elif failures:
+                    trainers_failed += 1
+            except Exception:
+                self.db.rollback()
+                trainers_failed += 1
+                logger.exception(
+                    "Failed to queue trainer for device sync",
+                    extra={"trainer_id": trainer.id},
+                )
+        return {
+            "trainers_queued": trainers_queued,
+            "commands_queued": commands_queued,
+            "trainers_failed": trainers_failed,
+            "command_failures": command_failures,
+        }
 
     def get_trainer_assigned_members(self, trainer_id: int) -> list[Member]:
         return self.member_repository.list_members_for_trainer(trainer_id)
