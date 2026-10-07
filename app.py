@@ -20,6 +20,8 @@ from routes import (
     member_router,
     trainer_router,
     internal_router,
+    public_router,
+    website_enquiries_router,
 )
 
 
@@ -69,6 +71,8 @@ def create_app() -> FastAPI:
     app.include_router(device_router)
     app.include_router(device_mgmt_router)
     app.include_router(internal_router)
+    app.include_router(public_router)
+    app.include_router(website_enquiries_router)
     return app
 
 

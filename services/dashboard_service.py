@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
+from models.website_enquiry import WebsiteEnquiry
 from repositories import DashboardRepository
 from schemas.dashboard import (
     AdminDashboardResponse,
@@ -35,6 +36,9 @@ class DashboardService:
         inactive_members = self.repository.get_inactive_members()
         expiring_memberships = self.repository.get_expiring_memberships(days=30)
         recent_members = self.repository.get_recent_registrations(limit=5)
+        new_enquiries = (
+            self.db.query(WebsiteEnquiry).filter(WebsiteEnquiry.status == "new").count()
+        )
 
         return AdminDashboardResponse(
             total_members=total_members,
@@ -44,6 +48,7 @@ class DashboardService:
             monthly_revenue=None,
             expiring_memberships=expiring_memberships,
             todays_checkins=None,
+            new_enquiries=new_enquiries,
             recent_registrations=[
                 RecentRegistration(
                     name=member.full_name,

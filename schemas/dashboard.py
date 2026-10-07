@@ -33,6 +33,7 @@ class AdminDashboardResponse(BaseModel):
     monthly_revenue: float | None = Field(None, description="Revenue this month")
     expiring_memberships: int | None = Field(None, description="Memberships expiring this month")
     todays_checkins: int | None = Field(None, description="Check-ins today")
+    new_enquiries: int = Field(0, description="Website enquiries still marked new")
     recent_registrations: List[RecentRegistration] = Field(..., description="Recently registered members")
     
     class Config:

@@ -13,6 +13,7 @@ from .device_attendance_log import DeviceAttendanceLog
 from .business_setting import BusinessSetting
 from .attendance_punch import AttendancePunch
 from .otp_challenge import OtpChallenge
+from .website_enquiry import WebsiteEnquiry
 
 __all__ = [
 	"User",
@@ -29,4 +30,5 @@ __all__ = [
 	"BusinessSetting",
 	"AttendancePunch",
 	"OtpChallenge",
+	"WebsiteEnquiry",
 ]
