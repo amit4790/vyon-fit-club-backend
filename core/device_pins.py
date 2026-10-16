@@ -28,7 +28,7 @@ def resolve_device_pin(pin: int) -> tuple[str, int] | None:
         ("member", member_id) when 0 < pin <= TRAINER_PIN_OFFSET
         None for invalid pins
 
-    Attendance ingest ignores member mappings; only trainers are punched.
+    Attendance ingest stores both member and trainer punches.
     """
     try:
         value = int(pin)

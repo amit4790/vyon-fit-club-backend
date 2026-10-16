@@ -56,7 +56,9 @@ from schemas.subscription import (
     SubscriptionOperationResponse,
 )
 from schemas.attendance import (
+    AttendancePunchDetailRow,
     AttendancePurgeResponse,
+    DailyAttendanceDetailResponse,
     DailyAttendanceResponse,
     DailyAttendanceRow,
     MonthlyAttendanceResponse,
@@ -786,12 +788,23 @@ def update_target_revenue(
     return UpdateTargetRevenueResponse(message="Target revenue updated", data=summary)
 
 
+def _parse_attendance_person_type(person_type: str) -> str:
+    value = (person_type or "trainer").strip().lower()
+    if value not in {"trainer", "member"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="person_type must be trainer or member",
+        )
+    return value
+
+
 @router.get("/attendance/daily", response_model=DailyAttendanceResponse)
-def get_daily_trainer_attendance(
+def get_daily_attendance(
     day: str = Query(..., description="Date in YYYY-MM-DD"),
+    person_type: str = Query("trainer", description="trainer or member"),
     db: Session = Depends(get_db),
 ) -> DailyAttendanceResponse:
-    """Trainer check-ins for a single day (first punch per trainer)."""
+    """Check-ins for a single day (first punch per person)."""
     from datetime import date as date_cls
 
     try:
@@ -799,15 +812,18 @@ def get_daily_trainer_attendance(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid date") from exc
 
-    rows = AttendanceService(db).get_daily_trainer_attendance(parsed_day)
+    normalized = _parse_attendance_person_type(person_type)
+    rows = AttendanceService(db).get_daily_attendance(parsed_day, normalized)
+    label = "trainer" if normalized == "trainer" else "member"
     return DailyAttendanceResponse(
-        message="Daily trainer attendance",
+        message=f"Daily {label} attendance",
         date=parsed_day.isoformat(),
         data=[
             DailyAttendanceRow(
                 person_id=row.person_id,
                 person_name=row.person_name,
                 specialization=row.specialization,
+                phone_number=row.phone_number,
                 pin=row.pin,
                 # Always expose gym-local IST so FE/export stay aligned.
                 punched_at=to_device_local(row.punched_at),
@@ -818,16 +834,66 @@ def get_daily_trainer_attendance(
     )
 
 
+@router.get("/attendance/daily/detail", response_model=DailyAttendanceDetailResponse)
+def get_daily_attendance_detail(
+    day: str = Query(..., description="Date in YYYY-MM-DD"),
+    person_type: str = Query(..., description="trainer or member"),
+    person_id: int = Query(..., ge=1),
+    db: Session = Depends(get_db),
+) -> DailyAttendanceDetailResponse:
+    """All biometric punches for one person on a gym-local day."""
+    from datetime import date as date_cls
+
+    try:
+        parsed_day = date_cls.fromisoformat(day)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid date") from exc
+
+    normalized = _parse_attendance_person_type(person_type)
+    service = AttendanceService(db)
+    summary_rows = service.get_daily_attendance(parsed_day, normalized)
+    person_name = next(
+        (row.person_name for row in summary_rows if row.person_id == person_id),
+        None,
+    )
+    if person_name is None:
+        punches = service.get_person_day_punches(parsed_day, normalized, person_id)
+        if not punches:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No attendance for this person on this day")
+        person_name = f"{'Trainer' if normalized == 'trainer' else 'Member'} #{person_id}"
+    else:
+        punches = service.get_person_day_punches(parsed_day, normalized, person_id)
+
+    return DailyAttendanceDetailResponse(
+        message="Daily attendance detail",
+        date=parsed_day.isoformat(),
+        person_type=normalized,
+        person_id=person_id,
+        person_name=person_name,
+        data=[
+            AttendancePunchDetailRow(
+                punched_at=to_device_local(punch.punched_at),
+                pin=punch.pin,
+                is_late=punch.is_late,
+            )
+            for punch in punches
+        ],
+    )
+
+
 @router.get("/attendance/monthly", response_model=MonthlyAttendanceResponse)
-def get_monthly_trainer_attendance(
+def get_monthly_attendance(
     year: int = Query(..., ge=2020, le=2100),
     month: int = Query(..., ge=1, le=12),
+    person_type: str = Query("trainer", description="trainer or member"),
     db: Session = Depends(get_db),
 ) -> MonthlyAttendanceResponse:
-    """Monthly trainer attendance summary for salary review."""
-    rows = AttendanceService(db).get_monthly_trainer_summary(year, month)
+    """Monthly attendance summary."""
+    normalized = _parse_attendance_person_type(person_type)
+    rows = AttendanceService(db).get_monthly_summary(year, month, normalized)
+    label = "trainer" if normalized == "trainer" else "member"
     return MonthlyAttendanceResponse(
-        message="Monthly trainer attendance",
+        message=f"Monthly {label} attendance",
         year=year,
         month=month,
         data=[
@@ -835,6 +901,7 @@ def get_monthly_trainer_attendance(
                 person_id=row.person_id,
                 person_name=row.person_name,
                 specialization=row.specialization,
+                phone_number=row.phone_number,
                 days_present=row.days_present,
                 on_time_days=row.on_time_days,
                 late_days=row.late_days,
@@ -846,12 +913,13 @@ def get_monthly_trainer_attendance(
 
 
 @router.get("/attendance/export")
-def export_monthly_trainer_attendance(
+def export_monthly_attendance(
     year: int = Query(..., ge=2020, le=2100),
     month: int = Query(..., ge=1, le=12),
+    person_type: str = Query("trainer", description="trainer or member"),
     db: Session = Depends(get_db),
 ) -> Response:
-    """Download trainer attendance CSV for a month within the retention window."""
+    """Download attendance CSV for a month within the retention window."""
     from datetime import date as date_cls
 
     today = date_cls.today()
@@ -870,8 +938,9 @@ def export_monthly_trainer_attendance(
             detail=f"Export is limited to the last {RETENTION_DAYS // 30} months of attendance data",
         )
 
-    csv_text = AttendanceService(db).build_month_csv(year, month)
-    filename = f"trainer-attendance-{year}-{month:02d}.csv"
+    normalized = _parse_attendance_person_type(person_type)
+    csv_text = AttendanceService(db).build_month_csv(year, month, normalized)
+    filename = f"{normalized}-attendance-{year}-{month:02d}.csv"
     return Response(
         content=csv_text,
         media_type="text/csv",
@@ -880,11 +949,12 @@ def export_monthly_trainer_attendance(
 
 
 @router.get("/attendance/export/daily")
-def export_daily_trainer_attendance(
+def export_daily_attendance(
     day: str = Query(..., description="Date in YYYY-MM-DD"),
+    person_type: str = Query("trainer", description="trainer or member"),
     db: Session = Depends(get_db),
 ) -> Response:
-    """Download trainer attendance CSV for a single gym-local day."""
+    """Download attendance CSV for a single gym-local day."""
     from datetime import date as date_cls, timedelta
 
     try:
@@ -900,8 +970,9 @@ def export_daily_trainer_attendance(
             detail=f"Daily export is limited to the last {RETENTION_DAYS} days",
         )
 
-    csv_text = AttendanceService(db).build_day_csv(parsed_day)
-    filename = f"trainer-attendance-{parsed_day.isoformat()}.csv"
+    normalized = _parse_attendance_person_type(person_type)
+    csv_text = AttendanceService(db).build_day_csv(parsed_day, normalized)
+    filename = f"{normalized}-attendance-{parsed_day.isoformat()}.csv"
     return Response(
         content=csv_text,
         media_type="text/csv",
@@ -911,7 +982,7 @@ def export_daily_trainer_attendance(
 
 @router.post("/attendance/purge", response_model=AttendancePurgeResponse)
 def purge_old_attendance(db: Session = Depends(get_db)) -> AttendancePurgeResponse:
-    """Delete attendance punches and raw logs older than retention window."""
+    """Delete punches older than the calendar retention window (run monthly, not daily)."""
     result = AttendanceService(db).purge_old_records()
     return AttendancePurgeResponse(
         message="Old attendance data purged",
@@ -919,6 +990,7 @@ def purge_old_attendance(db: Session = Depends(get_db)) -> AttendancePurgeRespon
         raw_logs_deleted=result["raw_logs_deleted"],
         retention_days=result["retention_days"],
         punch_retention_days=result["punch_retention_days"],
+        punch_retention_months=result["punch_retention_months"],
         raw_log_retention_days=result["raw_log_retention_days"],
     )
 

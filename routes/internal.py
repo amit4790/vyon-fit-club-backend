@@ -36,8 +36,9 @@ def cron_purge_attendance(
     x_cron_secret: str | None = Header(default=None, alias="X-Cron-Secret"),
 ) -> AttendancePurgeResponse:
     """
-    Nightly-friendly purge of old punches and raw device logs.
+    Purge punches outside the calendar retention window and trim raw device logs.
 
+    Intended schedule: once per month (e.g. 1st of month), not daily.
     Auth: header ``X-Cron-Secret`` must match ``CRON_SECRET``.
     """
     _require_cron_secret(x_cron_secret)
@@ -48,5 +49,6 @@ def cron_purge_attendance(
         raw_logs_deleted=result["raw_logs_deleted"],
         retention_days=result["retention_days"],
         punch_retention_days=result["punch_retention_days"],
+        punch_retention_months=result["punch_retention_months"],
         raw_log_retention_days=result["raw_log_retention_days"],
     )

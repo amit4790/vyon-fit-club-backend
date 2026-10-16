@@ -57,8 +57,11 @@ class Settings(BaseSettings):
     # Only these cdata tables are written to device_attendance_logs (comma-separated).
     # OPERLOG/BIODATA are ack'd without insert. Set "ATTLOG,USERINFO" while debugging sync.
     device_persist_cdata_tables: str = "ATTLOG"
-    # Retention: punches kept longer for payroll; raw blobs are debug-only.
+    # Retention: punches for admin export window; raw blobs are debug-only.
     attendance_punch_retention_days: int = 90
+    # Calendar months of punch data to keep (current month + prior months - 1).
+    # Purge is intended monthly (e.g. cron on the 1st), not daily.
+    attendance_punch_retention_months: int = 3
     device_raw_log_retention_days: int = 14
     # Shared secret for POST /api/internal/cron/* (Render Cron Job header X-Cron-Secret).
     cron_secret: str = ""
