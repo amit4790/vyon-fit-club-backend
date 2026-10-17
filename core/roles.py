@@ -8,3 +8,4 @@ class UserRole(StrEnum):
     ADMIN = "ADMIN"
     TRAINER = "TRAINER"
     MEMBER = "MEMBER"
+    GYM_TABLET = "GYM_TABLET"

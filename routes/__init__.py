@@ -14,6 +14,7 @@ from .trainer import router as trainer_router
 from .internal import router as internal_router
 from .public import router as public_router
 from .website_enquiries import router as website_enquiries_router
+from .gym_tablet import router as gym_tablet_router
 
 __all__ = [
     "health_router",
@@ -28,4 +29,5 @@ __all__ = [
     "internal_router",
     "public_router",
     "website_enquiries_router",
+    "gym_tablet_router",
 ]

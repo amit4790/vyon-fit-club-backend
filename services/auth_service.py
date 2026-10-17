@@ -12,7 +12,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from core.config import settings
-from core.authorization import can_access_admin
+from core.authorization import can_use_password_login
 from core.roles import UserRole
 from core.security import verify_password
 from models import User
@@ -56,7 +56,7 @@ class AuthService:
             )
         ).scalar_one_or_none()
         
-        if not user or not verify_password(password, user.password_hash) or not can_access_admin(user.role):
+        if not user or not verify_password(password, user.password_hash) or not can_use_password_login(user.role):
             return False, None, "Invalid email or phone number or password"
         
         user_info = UserInfo(

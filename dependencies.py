@@ -8,7 +8,7 @@ from typing import Optional
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from core.authorization import can_access_admin
+from core.authorization import can_access_admin, can_access_body_assessments, can_access_gym_tablet
 from core.roles import UserRole
 from services.auth_service import AuthService, InvalidTokenError, SessionPayload, TokenExpiredError
 
@@ -66,4 +66,16 @@ def require_member_access(session: SessionPayload = Depends(get_current_session)
 def require_trainer_access(session: SessionPayload = Depends(get_current_session)) -> SessionPayload:
     if session.role != UserRole.TRAINER:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Trainer access required")
+    return session
+
+
+def require_gym_tablet_access(session: SessionPayload = Depends(get_current_session)) -> SessionPayload:
+    if not can_access_gym_tablet(session.role):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Gym tablet access required")
+    return session
+
+
+def require_body_assessment_access(session: SessionPayload = Depends(get_current_session)) -> SessionPayload:
+    if not can_access_body_assessments(session.role):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Body assessment access required")
     return session

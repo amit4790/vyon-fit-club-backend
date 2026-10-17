@@ -18,7 +18,9 @@ class UserInfo(BaseModel):
     id: str = Field(..., description="User ID")
     name: str = Field(..., description="User full name")
     email: str = Field(..., description="User email")
-    role: Literal["SUPER_ADMIN", "ADMIN", "TRAINER", "MEMBER"] = Field(..., description="User role")
+    role: Literal["SUPER_ADMIN", "ADMIN", "TRAINER", "MEMBER", "GYM_TABLET"] = Field(
+        ..., description="User role"
+    )
 
 
 class LoginResponse(BaseModel):

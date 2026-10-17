@@ -14,6 +14,7 @@ from .business_setting import BusinessSetting
 from .attendance_punch import AttendancePunch
 from .otp_challenge import OtpChallenge
 from .website_enquiry import WebsiteEnquiry
+from .body_assessment import BodyAssessment, BodyAssessmentMetric
 
 __all__ = [
 	"User",
@@ -31,4 +32,6 @@ __all__ = [
 	"AttendancePunch",
 	"OtpChallenge",
 	"WebsiteEnquiry",
+	"BodyAssessment",
+	"BodyAssessmentMetric",
 ]
