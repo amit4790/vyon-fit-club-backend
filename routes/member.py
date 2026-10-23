@@ -7,10 +7,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from database import get_db
-from dependencies import require_member_access
+from dependencies import require_linked_member_id, require_member_access
 from models import Member, User
+from schemas.member_body_assessment import (
+    MemberBodyAssessmentListResponse,
+    MemberBodyAssessmentOperationResponse,
+)
 from schemas.member_mobile import MemberMeData, MemberMeResponse
 from services.auth_service import SessionPayload
+from services.body_assessment_service import BodyAssessmentService
 
 router = APIRouter(prefix="/api/member", tags=["member"])
 
@@ -43,3 +48,24 @@ def get_member_me(
             has_pin=bool(user.pin_hash),
         )
     )
+
+
+@router.get("/body-assessments", response_model=MemberBodyAssessmentListResponse)
+def list_my_body_assessments(
+    member_id: int = Depends(require_linked_member_id),
+    db: Session = Depends(get_db),
+) -> MemberBodyAssessmentListResponse:
+    data = BodyAssessmentService(db).list_member_assessments(member_id)
+    return MemberBodyAssessmentListResponse(message="Your body assessments", data=data)
+
+
+@router.get("/body-assessments/{assessment_id}", response_model=MemberBodyAssessmentOperationResponse)
+def get_my_body_assessment(
+    assessment_id: int,
+    member_id: int = Depends(require_linked_member_id),
+    db: Session = Depends(get_db),
+) -> MemberBodyAssessmentOperationResponse:
+    data = BodyAssessmentService(db).get_member_assessment(member_id, assessment_id)
+    if not data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assessment not found")
+    return MemberBodyAssessmentOperationResponse(message="Assessment detail", data=data)

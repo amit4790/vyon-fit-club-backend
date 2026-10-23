@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from schemas.medical_questionnaire import MedicalQuestionnaire
+
 
 class MetricInput(BaseModel):
     metric_key: str = Field(..., min_length=1, max_length=60)
@@ -21,6 +23,7 @@ class BodyAssessmentCreateRequest(BaseModel):
     primary_goal: str | None = Field(None, max_length=200)
     trainer_observations: str | None = Field(None, max_length=4000)
     medical_history: str | None = Field(None, max_length=4000)
+    medical_questionnaire: MedicalQuestionnaire | None = None
     next_assessment_date: date | None = None
     metrics: list[MetricInput] = Field(default_factory=list)
 
@@ -52,6 +55,7 @@ class BodyAssessmentResponse(BaseModel):
     primary_goal: str | None
     trainer_observations: str | None
     medical_history: str | None
+    medical_questionnaire: MedicalQuestionnaire | None = None
     next_assessment_date: date | None
     completed_at: datetime | None
     metrics: list[MetricResponse]

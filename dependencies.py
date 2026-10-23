@@ -7,9 +7,13 @@ from typing import Optional
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from core.authorization import can_access_admin, can_access_body_assessments, can_access_gym_tablet
 from core.roles import UserRole
+from database import get_db
+from models import Member
 from services.auth_service import AuthService, InvalidTokenError, SessionPayload, TokenExpiredError
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -79,3 +83,15 @@ def require_body_assessment_access(session: SessionPayload = Depends(get_current
     if not can_access_body_assessments(session.role):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Body assessment access required")
     return session
+
+
+def require_linked_member_id(
+    session: SessionPayload = Depends(require_member_access),
+    db: Session = Depends(get_db),
+) -> int:
+    member = db.execute(
+        select(Member).where(Member.user_id == int(session.user_id), Member.deleted_at.is_(None))
+    ).scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member profile not linked")
+    return member.id

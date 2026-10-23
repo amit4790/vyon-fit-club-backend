@@ -3,6 +3,7 @@
 from datetime import date, datetime
 
 from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
@@ -22,6 +23,7 @@ class BodyAssessment(Base):
     primary_goal: Mapped[str | None] = mapped_column(String(200), nullable=True)
     trainer_observations: Mapped[str | None] = mapped_column(Text, nullable=True)
     medical_history: Mapped[str | None] = mapped_column(Text, nullable=True)
+    medical_questionnaire: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     next_assessment_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

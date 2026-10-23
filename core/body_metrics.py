@@ -6,6 +6,7 @@ METRIC_WEIGHT_KG = "weight_kg"
 METRIC_HEIGHT_CM = "height_cm"
 METRIC_BMI = "bmi"
 METRIC_BODY_FAT_PCT = "body_fat_pct"
+METRIC_VISCERAL_FAT_LEVEL = "visceral_fat_level"
 METRIC_MUSCLE_MASS_KG = "muscle_mass_kg"
 METRIC_BMR_KCAL = "bmr_kcal"
 METRIC_WAIST_CM = "waist_cm"
@@ -29,6 +30,7 @@ METRIC_UNITS: dict[str, str] = {
     METRIC_HEIGHT_CM: "cm",
     METRIC_BMI: "kg/m2",
     METRIC_BODY_FAT_PCT: "%",
+    METRIC_VISCERAL_FAT_LEVEL: "level",
     METRIC_MUSCLE_MASS_KG: "kg",
     METRIC_BMR_KCAL: "kcal",
     METRIC_WAIST_CM: "cm",

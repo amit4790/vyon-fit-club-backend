@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
+from core.assessment_age import age_years_at, approximate_dob_from_age
 from core.body_metrics import (
     METRIC_BMI,
     METRIC_BODY_FAT_PCT,
@@ -30,6 +31,11 @@ from schemas.body_assessment import (
     MetricResponse,
     ProgressMetricChange,
 )
+from schemas.medical_questionnaire import FITNESS_GOAL_DISPLAY, MedicalQuestionnaire
+from schemas.member_body_assessment import (
+    MemberBodyAssessmentDetail,
+    MemberBodyAssessmentSummary,
+)
 
 
 class DuplicateAssessmentDateError(Exception):
@@ -50,6 +56,78 @@ class BodyAssessmentService:
     def _metrics_map(self, assessment: BodyAssessment) -> dict[str, float]:
         return {metric.metric_key: metric.value_numeric for metric in assessment.metrics}
 
+    def _fitness_goals_label(self, assessment: BodyAssessment) -> str | None:
+        if assessment.primary_goal and assessment.primary_goal.strip():
+            return assessment.primary_goal.strip()
+        raw = getattr(assessment, "medical_questionnaire", None)
+        if not raw:
+            return None
+        keys = raw.get("fitness_goals") or []
+        if not keys:
+            return None
+        labels = [FITNESS_GOAL_DISPLAY.get(k, k.replace("_", " ").title()) for k in keys]
+        return ", ".join(labels)
+
+    def _member_metrics(self, assessment: BodyAssessment) -> list[MetricResponse]:
+        return [
+            MetricResponse(
+                metric_key=m.metric_key,
+                value=m.value_numeric,
+                unit=m.unit,
+                source=m.source,
+            )
+            for m in assessment.metrics
+        ]
+
+    def _to_member_summary(self, assessment: BodyAssessment) -> MemberBodyAssessmentSummary:
+        return MemberBodyAssessmentSummary(
+            id=assessment.id,
+            assessed_on=assessment.assessed_on,
+            fitness_goals=self._fitness_goals_label(assessment),
+        )
+
+    def _to_member_detail(self, assessment: BodyAssessment) -> MemberBodyAssessmentDetail:
+        return MemberBodyAssessmentDetail(
+            id=assessment.id,
+            assessed_on=assessment.assessed_on,
+            fitness_goals=self._fitness_goals_label(assessment),
+            metrics=self._member_metrics(assessment),
+        )
+
+    def list_member_assessments(self, member_id: int) -> list[MemberBodyAssessmentSummary]:
+        rows = self.repo.list_for_member(member_id)
+        return [self._to_member_summary(row) for row in rows]
+
+    def get_member_assessment(self, member_id: int, assessment_id: int) -> MemberBodyAssessmentDetail | None:
+        row = self.repo.get_by_id(assessment_id)
+        if not row or row.member_id != member_id or row.status != "completed":
+            return None
+        return self._to_member_detail(row)
+
+    def _parse_questionnaire(self, raw: dict | None) -> MedicalQuestionnaire | None:
+        if not raw:
+            return None
+        return MedicalQuestionnaire.model_validate(raw)
+
+    def _resolve_questionnaire(
+        self, member_id: int, assessed_on: date, payload: MedicalQuestionnaire | None
+    ) -> MedicalQuestionnaire | None:
+        if payload is None:
+            return None
+        member = self.member_repo.get_member_by_id(member_id)
+        if not member:
+            raise ValueError("Member not found")
+
+        data = payload.model_dump()
+        if member.date_of_birth:
+            data["age_years"] = age_years_at(member.date_of_birth, assessed_on)
+        elif data.get("age_years") is None:
+            raise ValueError("Age is required when member date of birth is not on file")
+        elif member.date_of_birth is None and data.get("age_years") is not None:
+            member.date_of_birth = approximate_dob_from_age(int(data["age_years"]), assessed_on)
+
+        return MedicalQuestionnaire.model_validate(data)
+
     def _to_response(self, assessment: BodyAssessment) -> BodyAssessmentResponse:
         return BodyAssessmentResponse(
             id=assessment.id,
@@ -64,6 +142,7 @@ class BodyAssessmentService:
             primary_goal=assessment.primary_goal,
             trainer_observations=assessment.trainer_observations,
             medical_history=assessment.medical_history,
+            medical_questionnaire=self._parse_questionnaire(assessment.medical_questionnaire),
             next_assessment_date=assessment.next_assessment_date,
             completed_at=assessment.completed_at,
             metrics=[
@@ -88,6 +167,8 @@ class BodyAssessmentService:
         if self.repo.get_completed_on_date(member_id, payload.assessed_on):
             raise DuplicateAssessmentDateError("An assessment already exists for this date")
 
+        questionnaire = self._resolve_questionnaire(member_id, payload.assessed_on, payload.medical_questionnaire)
+
         now = datetime.now(timezone.utc)
         assessment = BodyAssessment(
             member_id=member_id,
@@ -100,6 +181,7 @@ class BodyAssessmentService:
             primary_goal=payload.primary_goal,
             trainer_observations=payload.trainer_observations,
             medical_history=payload.medical_history,
+            medical_questionnaire=questionnaire.model_dump(mode="json") if questionnaire else None,
             next_assessment_date=payload.next_assessment_date,
             completed_at=now,
         )
