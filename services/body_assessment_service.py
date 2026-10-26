@@ -92,6 +92,7 @@ class BodyAssessmentService:
             assessed_on=assessment.assessed_on,
             fitness_goals=self._fitness_goals_label(assessment),
             metrics=self._member_metrics(assessment),
+            metric_targets=assessment.metric_targets,
         )
 
     def list_member_assessments(self, member_id: int) -> list[MemberBodyAssessmentSummary]:
@@ -143,6 +144,7 @@ class BodyAssessmentService:
             trainer_observations=assessment.trainer_observations,
             medical_history=assessment.medical_history,
             medical_questionnaire=self._parse_questionnaire(assessment.medical_questionnaire),
+            metric_targets=assessment.metric_targets,
             next_assessment_date=assessment.next_assessment_date,
             completed_at=assessment.completed_at,
             metrics=[
@@ -182,6 +184,7 @@ class BodyAssessmentService:
             trainer_observations=payload.trainer_observations,
             medical_history=payload.medical_history,
             medical_questionnaire=questionnaire.model_dump(mode="json") if questionnaire else None,
+            metric_targets=payload.metric_targets,
             next_assessment_date=payload.next_assessment_date,
             completed_at=now,
         )

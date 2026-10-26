@@ -9,6 +9,7 @@ METRIC_BODY_FAT_PCT = "body_fat_pct"
 METRIC_VISCERAL_FAT_LEVEL = "visceral_fat_level"
 METRIC_MUSCLE_MASS_KG = "muscle_mass_kg"
 METRIC_BMR_KCAL = "bmr_kcal"
+METRIC_METABOLIC_AGE_YEARS = "metabolic_age_years"
 METRIC_WAIST_CM = "waist_cm"
 METRIC_CHEST_CM = "chest_cm"
 METRIC_UPPER_CHEST_CM = "upper_chest_cm"
@@ -33,6 +34,7 @@ METRIC_UNITS: dict[str, str] = {
     METRIC_VISCERAL_FAT_LEVEL: "level",
     METRIC_MUSCLE_MASS_KG: "kg",
     METRIC_BMR_KCAL: "kcal",
+    METRIC_METABOLIC_AGE_YEARS: "years",
     METRIC_WAIST_CM: "cm",
     METRIC_CHEST_CM: "cm",
     METRIC_UPPER_CHEST_CM: "cm",
@@ -55,6 +57,11 @@ PROGRESS_SUMMARY_METRICS = (
     METRIC_BODY_FAT_PCT,
     METRIC_MUSCLE_MASS_KG,
     METRIC_WAIST_CM,
+)
+
+# Metrics trainers may set a goal/target for (height is current-only).
+TARGETABLE_METRIC_KEYS: frozenset[str] = frozenset(
+    key for key in METRIC_UNITS if key != METRIC_HEIGHT_CM
 )
 
 METRIC_SOURCE_MACHINE = "machine"

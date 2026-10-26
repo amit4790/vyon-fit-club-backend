@@ -18,6 +18,7 @@ class MemberBodyAssessmentDetail(BaseModel):
     assessed_on: date
     fitness_goals: str | None = None
     metrics: list[MetricResponse]
+    metric_targets: dict[str, float] | None = None
 
 
 class MemberBodyAssessmentListResponse(BaseModel):

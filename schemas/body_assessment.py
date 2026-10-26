@@ -5,6 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from core.body_metrics import METRIC_UNITS, TARGETABLE_METRIC_KEYS
 from schemas.medical_questionnaire import MedicalQuestionnaire
 
 
@@ -24,8 +25,23 @@ class BodyAssessmentCreateRequest(BaseModel):
     trainer_observations: str | None = Field(None, max_length=4000)
     medical_history: str | None = Field(None, max_length=4000)
     medical_questionnaire: MedicalQuestionnaire | None = None
+    metric_targets: dict[str, float] | None = None
     next_assessment_date: date | None = None
     metrics: list[MetricInput] = Field(default_factory=list)
+
+    @field_validator("metric_targets")
+    @classmethod
+    def validate_metric_targets(cls, targets: dict[str, float] | None) -> dict[str, float] | None:
+        if not targets:
+            return None
+        cleaned: dict[str, float] = {}
+        for key, value in targets.items():
+            if key not in TARGETABLE_METRIC_KEYS:
+                raise ValueError(f"Invalid target metric key: {key}")
+            if key not in METRIC_UNITS:
+                raise ValueError(f"Unknown target metric key: {key}")
+            cleaned[key] = float(value)
+        return cleaned or None
 
     @field_validator("metrics")
     @classmethod
@@ -56,6 +72,7 @@ class BodyAssessmentResponse(BaseModel):
     trainer_observations: str | None
     medical_history: str | None
     medical_questionnaire: MedicalQuestionnaire | None = None
+    metric_targets: dict[str, float] | None = None
     next_assessment_date: date | None
     completed_at: datetime | None
     metrics: list[MetricResponse]

@@ -24,6 +24,7 @@ class BodyAssessment(Base):
     trainer_observations: Mapped[str | None] = mapped_column(Text, nullable=True)
     medical_history: Mapped[str | None] = mapped_column(Text, nullable=True)
     medical_questionnaire: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    metric_targets: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     next_assessment_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
