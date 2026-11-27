@@ -484,6 +484,10 @@ class PushDeviceService:
         if success:
             member.device_sync_status = "synced"
             member.last_device_sync_at = datetime.now(timezone.utc)
+            if re.search(r"\bPri=1\b", raw_command, re.IGNORECASE):
+                member.device_access_enabled = False
+            elif re.search(r"\bPri=0\b", raw_command, re.IGNORECASE):
+                member.device_access_enabled = True
         else:
             member.device_sync_status = "failed"
 

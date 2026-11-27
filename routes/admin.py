@@ -47,6 +47,8 @@ from schemas.invoice import (
 from schemas.report import ReportsSummaryResponse, UpdateTargetRevenueRequest, UpdateTargetRevenueResponse
 from schemas.subscription import (
     AssignSubscriptionRequest,
+    ConvertMembershipRequest,
+    CancelSubscriptionResponse,
     ChangeSubscriptionPlanRequest,
     ExpiringSubscriptionsResponse,
     MemberSubscriptionsResponse,
@@ -107,6 +109,10 @@ from services.invoice_service import (
     InvoiceNotFoundError,
     InvoiceService,
     SubscriptionNotFoundError,
+)
+from services.membership_lifecycle_service import (
+    EffectiveMembershipConflictError,
+    InvalidLifecycleTransitionError,
 )
 from services.subscription_service import (
     MemberNotFoundError as SubscriptionMemberNotFoundError,
@@ -623,6 +629,7 @@ def assign_member_subscription(
             duration_unit=payload.duration_unit,
             bonus_duration_value=payload.bonus_duration_value,
             bonus_duration_unit=payload.bonus_duration_unit,
+            assignment_intent=payload.assignment_intent,
         )
     except SubscriptionMemberNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -630,9 +637,54 @@ def assign_member_subscription(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except SubscriptionConflictError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except EffectiveMembershipConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except InvalidLifecycleTransitionError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     return SubscriptionOperationResponse(
         message="Subscription assigned successfully",
+        data=subscription,
+        notifications=notifications,
+    )
+
+
+@router.post(
+    "/members/{member_id}/subscriptions/convert",
+    response_model=SubscriptionOperationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def convert_member_membership(
+    member_id: int,
+    payload: ConvertMembershipRequest,
+    db: Session = Depends(get_db),
+) -> SubscriptionOperationResponse:
+    """Convert membership: pause current effective plan and start the new plan immediately."""
+    service = SubscriptionService(db)
+
+    try:
+        subscription, notifications = service.convert_membership(
+            member_id=member_id,
+            plan_id=payload.plan_id,
+            start_date=payload.start_date,
+            duration_value=payload.duration_value,
+            duration_unit=payload.duration_unit,
+            bonus_duration_value=payload.bonus_duration_value,
+            bonus_duration_unit=payload.bonus_duration_unit,
+        )
+    except SubscriptionMemberNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except PlanNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except SubscriptionConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except EffectiveMembershipConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except InvalidLifecycleTransitionError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    return SubscriptionOperationResponse(
+        message="Membership converted successfully",
         data=subscription,
         notifications=notifications,
     )
@@ -666,11 +718,41 @@ def change_subscription_plan(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except SubscriptionConflictError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except InvalidLifecycleTransitionError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     return SubscriptionOperationResponse(
         message="Subscription plan updated successfully",
         data=subscription,
         notifications=[],
+    )
+
+
+@router.post(
+    "/subscriptions/{subscription_id}/cancel",
+    response_model=CancelSubscriptionResponse,
+)
+def cancel_subscription(
+    subscription_id: int,
+    db: Session = Depends(get_db),
+) -> CancelSubscriptionResponse:
+    """
+    Immediately cancel the effective active subscription and resume any paused predecessor.
+
+    Historical invoices are unchanged. Idempotent when the subscription is already cancelled.
+    """
+    service = SubscriptionService(db)
+
+    try:
+        subscription = service.cancel_subscription(subscription_id=subscription_id)
+    except SubscriptionLookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except InvalidLifecycleTransitionError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    return CancelSubscriptionResponse(
+        message="Subscription cancelled successfully",
+        data=subscription,
     )
 
 

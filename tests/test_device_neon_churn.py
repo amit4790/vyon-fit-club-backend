@@ -16,7 +16,7 @@ from core.config import settings
 from database import Base
 from models import DeviceAttendanceLog, PushDevice
 from routes.device import receive_attendance_data
-from routes.internal import cron_purge_attendance
+from routes.internal import cron_purge_attendance, cron_sync_expired_memberships
 from services.attendance_service import AttendanceService
 from services.push_device_service import PushDeviceService, device_poll_cache
 
@@ -131,6 +131,22 @@ def test_cron_purge_requires_secret(db: Session, monkeypatch):
     response = cron_purge_attendance(db=db, x_cron_secret="test-cron-secret")
     assert response.punches_deleted == 0
     assert response.raw_log_retention_days == settings.device_raw_log_retention_days
+
+
+def test_cron_sync_expired_memberships_requires_secret(db: Session, monkeypatch):
+    monkeypatch.setattr(settings, "cron_secret", "")
+    with pytest.raises(HTTPException) as missing:
+        cron_sync_expired_memberships(db=db, x_cron_secret="anything")
+    assert missing.value.status_code == 503
+
+    monkeypatch.setattr(settings, "cron_secret", "test-cron-secret")
+    with pytest.raises(HTTPException) as bad:
+        cron_sync_expired_memberships(db=db, x_cron_secret="wrong")
+    assert bad.value.status_code == 401
+
+    response = cron_sync_expired_memberships(db=db, x_cron_secret="test-cron-secret")
+    assert response.subscriptions_marked_expired == 0
+    assert response.members_device_synced == 0
 
 
 def test_userinfo_skipped_by_default(db: Session):

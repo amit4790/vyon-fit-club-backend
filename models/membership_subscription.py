@@ -3,7 +3,7 @@
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Date, DateTime, ForeignKey, Integer, Numeric, String, func
+from sqlalchemy import Date, DateTime, ForeignKey, Index, Integer, Numeric, String, func, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
@@ -18,6 +18,16 @@ class MembershipSubscription(Base):
     """Member to plan subscription record."""
 
     __tablename__ = "membership_subscriptions"
+    __table_args__ = (
+        Index(
+            "uq_membership_subscriptions_one_effective_active",
+            "member_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
+        Index("ix_membership_subscriptions_resume_after", "resume_after_subscription_id"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     member_id: Mapped[int] = mapped_column(ForeignKey("members.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -35,6 +45,14 @@ class MembershipSubscription(Base):
     total_amount: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
     payment_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    remaining_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    resume_after_subscription_id: Mapped[int | None] = mapped_column(
+        ForeignKey("membership_subscriptions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    assignment_intent: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -3,7 +3,7 @@
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
@@ -37,6 +37,8 @@ class Member(Base):
     device_card: Mapped[int | None] = mapped_column(Integer, nullable=True)
     device_sync_status: Mapped[str] = mapped_column(String(20), nullable=False, default="unlinked")
     last_device_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # None = unknown; True/False set from successful USERINFO ACK (Pri=0 / Pri=1).
+    device_access_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     trainer_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,

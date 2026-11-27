@@ -3,31 +3,12 @@
 from datetime import date, timedelta
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.orm import Session
 
-from database import Base
 from models import Invoice, Member, MembershipPlan, MembershipSubscription
 from routes import admin as admin_routes
 from services.member_service import MemberService
 from services.subscription_service import SubscriptionService
-
-
-@pytest.fixture()
-def db() -> Session:
-    engine = create_engine(
-        "sqlite+pysqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    Base.metadata.create_all(bind=engine)
-    SessionLocal = sessionmaker(bind=engine)
-    session = SessionLocal()
-    try:
-        yield session
-    finally:
-        session.close()
 
 
 def _seed_plan(db: Session) -> MembershipPlan:
@@ -237,13 +218,13 @@ def test_assign_subscription_still_syncs_expired(db: Session, monkeypatch):
     plan = _seed_plan(db)
     member = _seed_member(db, name="Assign Sync", mobile="9000000007")
     calls = {"count": 0}
-    original = SubscriptionService.sync_expired_subscriptions
+    original = SubscriptionService._sync_expired_subscriptions_for_member
 
-    def _tracking(self):
+    def _tracking(self, member_id, today, *, lifecycle=None):
         calls["count"] += 1
-        return original(self)
+        return original(self, member_id, today, lifecycle=lifecycle)
 
-    monkeypatch.setattr(SubscriptionService, "sync_expired_subscriptions", _tracking)
+    monkeypatch.setattr(SubscriptionService, "_sync_expired_subscriptions_for_member", _tracking)
     monkeypatch.setattr(
         SubscriptionService,
         "_sync_device_access_for_members",
