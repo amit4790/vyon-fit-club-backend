@@ -16,7 +16,20 @@ from decimal import Decimal, ROUND_HALF_UP
 from sqlalchemy.orm import Session
 
 from core.config import settings
+from core.membership_lifecycle import (
+    ASSIGNMENT_INTENT_CONVERSION,
+    ASSIGNMENT_INTENT_NEW,
+    ASSIGNMENT_INTENT_RENEW,
+    STATUS_CANCELLED,
+    STATUS_SCHEDULED,
+    is_effective_active,
+)
 from models import Invoice, MembershipPlan, MembershipSubscription
+from services.membership_lifecycle_service import (
+    EffectiveMembershipConflictError,
+    InvalidLifecycleTransitionError,
+    MembershipLifecycleService,
+)
 from repositories.invoice_repository import InvoiceRepository
 from repositories.subscription_repository import SubscriptionRepository
 from schemas.subscription import (
@@ -159,24 +172,99 @@ class SubscriptionService:
         total_days = (row.end_date - row.start_date).days + 1
         return self._format_duration_label(max(total_days, 1), "days")
 
+    def _sync_expired_subscriptions_for_member(
+        self,
+        member_id: int,
+        today: date,
+        *,
+        lifecycle: MembershipLifecycleService | None = None,
+    ) -> set[int]:
+        """
+        Expire overdue active rows for one member without committing.
+
+        Caller must hold ``lock_member_for_lifecycle`` for ``member_id``.
+        """
+        lifecycle = lifecycle or MembershipLifecycleService(self.db)
+        affected: set[int] = set()
+        expired = self.repo.list_expired_subscriptions_for_member(member_id, today)
+        for row in expired:
+            affected.update(
+                lifecycle.complete_subscription_and_continue(
+                    row,
+                    today=today,
+                    assume_lock_held=True,
+                )
+            )
+        return affected
+
     def sync_expired_subscriptions(self) -> None:
+        """Mark overdue active subscriptions expired, resume stack, sync device."""
         today = date.today()
         expired = self.repo.list_expired_subscriptions(today=today)
         if not expired:
             return
 
-        affected_member_ids = {row.member_id for row in expired}
-        for row in expired:
-            row.status = "expired"
-        self.db.commit()
+        lifecycle = MembershipLifecycleService(self.db)
+        affected_member_ids: set[int] = set()
+        member_ids = sorted({row.member_id for row in expired})
+        for member_id in member_ids:
+            try:
+                lifecycle.lock_member_for_lifecycle(member_id)
+                affected_member_ids |= self._sync_expired_subscriptions_for_member(
+                    member_id,
+                    today,
+                    lifecycle=lifecycle,
+                )
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
 
-        # Disable face/access on device when the member has no remaining active plan.
         self._sync_device_access_for_members(affected_member_ids)
 
-    def _sync_device_access_for_members(self, member_ids: set[int]) -> None:
+    def run_nightly_expired_membership_sync(self) -> dict[str, int | str]:
+        """
+        Intended for daily cron: flip overdue subscriptions and queue device updates
+        only for members who expired tonight or still need Pri=1 (see
+        ``device_access_enabled`` on members).
+        """
+        today = date.today()
+        expired = self.repo.list_expired_subscriptions(today=today)
+        subscriptions_marked_expired = len(expired)
+        lifecycle = MembershipLifecycleService(self.db)
+        member_ids: set[int] = set()
+        for member_id in sorted({row.member_id for row in expired}):
+            try:
+                lifecycle.lock_member_for_lifecycle(member_id)
+                member_ids.update(
+                    self._sync_expired_subscriptions_for_member(
+                        member_id,
+                        today,
+                        lifecycle=lifecycle,
+                    )
+                )
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
+
+        member_ids |= self.repo.list_member_ids_needing_device_disable(today)
+        disabled, still_enabled = self._sync_device_access_for_members(member_ids)
+
+        return {
+            "run_date": today.isoformat(),
+            "subscriptions_marked_expired": subscriptions_marked_expired,
+            "members_device_synced": len(member_ids),
+            "members_disabled_on_device": disabled,
+            "members_still_enabled_on_device": still_enabled,
+        }
+
+    def _sync_device_access_for_members(self, member_ids: set[int]) -> tuple[int, int]:
         """Queue Pri=0/1 USERINFO updates so device access matches membership."""
+        disabled = 0
+        still_enabled = 0
         if not member_ids or not settings.device_push_enabled:
-            return
+            return disabled, still_enabled
 
         from services.push_device_service import PushDeviceService
 
@@ -193,11 +281,16 @@ class SubscriptionService:
                     member.full_name,
                     enabled=enabled,
                 )
+                if enabled:
+                    still_enabled += 1
+                else:
+                    disabled += 1
             except Exception:
                 logger.exception(
                     "Failed to sync device access after membership change",
                     extra={"member_id": member_id, "enabled": enabled},
                 )
+        return disabled, still_enabled
 
     def get_plan_catalog(self) -> list[PlanFamilyResponse]:
         plans = self.repo.list_active_plans()
@@ -299,10 +392,9 @@ class SubscriptionService:
         duration_unit: str | None = None,
         bonus_duration_value: int | None = None,
         bonus_duration_unit: str | None = None,
+        *,
+        assignment_intent: str = ASSIGNMENT_INTENT_NEW,
     ) -> tuple[SubscriptionResponse, list[dict]]:
-        # Keep expiry/device access current on write paths (not on list GETs).
-        self.sync_expired_subscriptions()
-
         member = self.repo.get_member_by_id(member_id)
         if not member:
             raise MemberNotFoundError("Member not found")
@@ -311,7 +403,30 @@ class SubscriptionService:
         if not plan:
             raise PlanNotFoundError("Membership plan not found")
 
-        # Multiple concurrent active memberships are allowed.
+        today = date.today()
+        lifecycle = MembershipLifecycleService(self.db)
+
+        try:
+            lifecycle.lock_member_for_lifecycle(member_id)
+            self._sync_expired_subscriptions_for_member(member_id, today, lifecycle=lifecycle)
+            effective_start, renew_anchor = lifecycle.validate_new_assignment(
+                member_id,
+                intent=assignment_intent,
+                start_date=start_date,
+                today=today,
+                assume_lock_held=True,
+            )
+        except InvalidLifecycleTransitionError as exc:
+            if "Member not found" in str(exc):
+                raise MemberNotFoundError("Member not found") from exc
+            raise
+
+        initial_status = lifecycle.resolve_initial_status(
+            intent=assignment_intent,
+            start_date=effective_start,
+            today=today,
+        )
+
         base_price = self._to_money(plan.base_price)
         tax_percent = self._to_money(plan.tax_percent)
         tax_amount = self._to_money(base_price * tax_percent / Decimal("100"))
@@ -330,7 +445,7 @@ class SubscriptionService:
             effective_bonus_unit,
         )
         end_date = self._calculate_end_date_with_bonus(
-            start_date=start_date,
+            start_date=effective_start,
             duration_value=effective_duration_value,
             duration_unit=effective_duration_unit,
             bonus_duration_value=effective_bonus_value,
@@ -340,19 +455,20 @@ class SubscriptionService:
         row = MembershipSubscription(
             member_id=member_id,
             plan_id=plan.id,
-            start_date=start_date,
+            start_date=effective_start,
             end_date=end_date,
             duration_value=effective_duration_value,
             duration_unit=effective_duration_unit,
             bonus_duration_value=effective_bonus_value,
             bonus_duration_unit=effective_bonus_unit,
             duration_label=duration_label,
-            status="active",
+            status=initial_status,
             payment_status="pending",
             base_price=float(base_price),
             tax_percent=float(tax_percent),
             tax_amount=float(tax_amount),
             total_amount=float(total_amount),
+            assignment_intent=assignment_intent,
         )
 
         invoice = Invoice(
@@ -363,7 +479,26 @@ class SubscriptionService:
         )
 
         try:
+            paused_superseded = lifecycle.supersede_effective_active_if_required(
+                member_id,
+                intent=assignment_intent,
+                today=today,
+            )
             row = self.repo.create_subscription(row)
+            if paused_superseded is not None:
+                lifecycle.link_paused_subscriptions_to_new_active(
+                    member_id,
+                    new_active_id=row.id,
+                    pause_effective_id=paused_superseded.id,
+                    today=today,
+                )
+            if (
+                assignment_intent == ASSIGNMENT_INTENT_RENEW
+                and row.status == STATUS_SCHEDULED
+                and renew_anchor is not None
+                and renew_anchor.id != row.id
+            ):
+                lifecycle.link_scheduled_renewal_to_anchor(row, anchor=renew_anchor)
             invoice.subscription_id = row.id
             self.invoice_repo.create_invoice(invoice)
             self.db.commit()
@@ -395,6 +530,28 @@ class SubscriptionService:
         self._sync_device_access_for_members({member_id})
         return self._to_subscription_response(row, duration_label_override=duration_label), notifications
 
+    def convert_membership(
+        self,
+        member_id: int,
+        plan_id: int,
+        start_date: date | None = None,
+        duration_value: int | None = None,
+        duration_unit: str | None = None,
+        bonus_duration_value: int | None = None,
+        bonus_duration_unit: str | None = None,
+    ) -> tuple[SubscriptionResponse, list[dict]]:
+        effective_start = start_date or date.today()
+        return self.assign_subscription(
+            member_id=member_id,
+            plan_id=plan_id,
+            start_date=effective_start,
+            duration_value=duration_value,
+            duration_unit=duration_unit,
+            bonus_duration_value=bonus_duration_value,
+            bonus_duration_unit=bonus_duration_unit,
+            assignment_intent=ASSIGNMENT_INTENT_CONVERSION,
+        )
+
     def change_subscription_plan(
         self,
         subscription_id: int,
@@ -405,9 +562,12 @@ class SubscriptionService:
         bonus_duration_value: int | None = None,
         bonus_duration_unit: str | None = None,
     ) -> SubscriptionResponse:
-        """Update an existing subscription to a different membership plan."""
-        self.sync_expired_subscriptions()
+        """
+        Administrative in-place correction on one subscription row (dates, duration, pricing).
 
+        Tier changes on an effective membership must use ``convert_membership`` / assign with
+        non-renew intent so the prior term is paused with preserved remaining days.
+        """
         row = self.repo.get_subscription_by_id(subscription_id)
         if not row:
             raise SubscriptionNotFoundError("Subscription not found")
@@ -415,9 +575,41 @@ class SubscriptionService:
         if row.status not in {"active", "expired"}:
             raise SubscriptionConflictError("Only active or expired subscriptions can change plan")
 
+        today = date.today()
+        lifecycle = MembershipLifecycleService(self.db)
+        try:
+            lifecycle.lock_member_for_lifecycle(row.member_id)
+            self._sync_expired_subscriptions_for_member(row.member_id, today, lifecycle=lifecycle)
+        except InvalidLifecycleTransitionError as exc:
+            if "Member not found" in str(exc):
+                raise MemberNotFoundError("Member not found") from exc
+            raise
+
         plan = self.repo.get_active_plan_by_id(plan_id)
         if not plan:
             raise PlanNotFoundError("Membership plan not found")
+
+        row_is_effective = is_effective_active(
+            status=row.status,
+            start_date=row.start_date,
+            end_date=row.end_date,
+            today=today,
+        )
+        plan_tier_changed = plan_id != row.plan_id
+
+        if plan_tier_changed and row_is_effective:
+            raise SubscriptionConflictError(
+                "Plan tier changes on an active membership require membership conversion"
+            )
+
+        other_effective = lifecycle.get_effective_active(row.member_id, today)
+        if other_effective is not None and other_effective.id != row.id:
+            raise SubscriptionConflictError(
+                "Another effective membership is active; use conversion to add a new plan"
+            )
+
+        if row.status == "expired" and other_effective is not None and other_effective.id != row.id:
+            raise SubscriptionConflictError("Cannot reactivate this subscription while another is effective")
 
         effective_start = start_date or row.start_date
 
@@ -458,7 +650,10 @@ class SubscriptionService:
         row.tax_percent = float(tax_percent)
         row.tax_amount = float(tax_amount)
         row.total_amount = float(total_amount)
-        row.status = "active"
+        if row.status == "expired":
+            if other_effective is not None and other_effective.id != row.id:
+                raise SubscriptionConflictError("Cannot reactivate this subscription while another is effective")
+            row.status = "active"
 
         invoice = self.invoice_repo.get_latest_invoice_by_subscription_id(subscription_id)
         if invoice:
@@ -496,6 +691,59 @@ class SubscriptionService:
         # Plan change / renew to active → re-enable device access when membership is valid.
         self._sync_device_access_for_members({row.member_id})
         return self._to_subscription_response(row, duration_label_override=duration_label)
+
+    def cancel_subscription(self, subscription_id: int) -> SubscriptionResponse:
+        """
+        Immediately cancel an active subscription and resume the paused predecessor (if any).
+
+        Does not delete or alter historical invoice rows for this or paused subscriptions.
+        """
+        row = self.repo.get_subscription_by_id(subscription_id)
+        if not row:
+            raise SubscriptionNotFoundError("Subscription not found")
+
+        today = date.today()
+        lifecycle = MembershipLifecycleService(self.db)
+        try:
+            lifecycle.lock_member_for_lifecycle(row.member_id)
+            self._sync_expired_subscriptions_for_member(row.member_id, today, lifecycle=lifecycle)
+        except InvalidLifecycleTransitionError as exc:
+            if "Member not found" in str(exc):
+                raise MemberNotFoundError("Member not found") from exc
+            raise
+
+        if row.status == STATUS_CANCELLED:
+            return self._to_subscription_response(row)
+
+        if row.status != "active":
+            raise InvalidLifecycleTransitionError("Only active subscriptions can be cancelled immediately")
+
+        if not is_effective_active(
+            status=row.status,
+            start_date=row.start_date,
+            end_date=row.end_date,
+            today=today,
+        ):
+            raise InvalidLifecycleTransitionError(
+                "Cancellation applies to the current effective active membership only"
+            )
+
+        try:
+            lifecycle.cancel_active_subscription_and_continue(
+                row,
+                today=today,
+                assume_lock_held=True,
+            )
+            self.db.commit()
+            row = self.repo.get_subscription_by_id(subscription_id)
+            if not row:
+                raise SubscriptionNotFoundError("Subscription not found")
+        except Exception:
+            self.db.rollback()
+            raise
+
+        self._sync_device_access_for_members({row.member_id})
+        return self._to_subscription_response(row)
 
     def get_member_subscriptions(self, member_id: int) -> list[SubscriptionResponse]:
         member = self.repo.get_member_by_id(member_id)
@@ -602,6 +850,12 @@ class SubscriptionService:
     ) -> SubscriptionResponse:
         plan = row.plan
         duration_label = duration_label_override or self._resolve_duration_label(row)
+
+        def _iso(dt) -> str | None:
+            if dt is None:
+                return None
+            return dt.isoformat()
+
         return SubscriptionResponse(
             id=row.id,
             member_id=row.member_id,
@@ -623,4 +877,9 @@ class SubscriptionService:
             tax_amount=float(row.tax_amount),
             total_amount=float(row.total_amount),
             payment_status=row.payment_status,
+            paused_at=_iso(getattr(row, "paused_at", None)),
+            resumed_at=_iso(getattr(row, "resumed_at", None)),
+            remaining_days=getattr(row, "remaining_days", None),
+            resume_after_subscription_id=getattr(row, "resume_after_subscription_id", None),
+            assignment_intent=getattr(row, "assignment_intent", None),
         )

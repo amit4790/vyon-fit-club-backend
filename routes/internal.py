@@ -10,7 +10,9 @@ from sqlalchemy.orm import Session
 from core.config import settings
 from database import get_db
 from schemas.attendance import AttendancePurgeResponse
+from schemas.subscription import ExpiredMembershipCronResponse
 from services.attendance_service import AttendanceService
+from services.subscription_service import SubscriptionService
 
 router = APIRouter(prefix="/api/internal/cron", tags=["internal-cron"])
 
@@ -51,4 +53,29 @@ def cron_purge_attendance(
         punch_retention_days=result["punch_retention_days"],
         punch_retention_months=result["punch_retention_months"],
         raw_log_retention_days=result["raw_log_retention_days"],
+    )
+
+
+@router.post("/sync-expired-memberships", response_model=ExpiredMembershipCronResponse)
+def cron_sync_expired_memberships(
+    db: Session = Depends(get_db),
+    x_cron_secret: str | None = Header(default=None, alias="X-Cron-Secret"),
+) -> ExpiredMembershipCronResponse:
+    """
+    Mark subscriptions past end_date as expired and queue ZKTeco access updates for
+    members who expired tonight or lack a valid plan and are not yet marked inactive
+    on device (``members.device_access_enabled``).
+
+    Intended schedule: once daily (e.g. 00:30 IST / 19:00 UTC previous day).
+    Auth: header ``X-Cron-Secret`` must match ``CRON_SECRET``.
+    """
+    _require_cron_secret(x_cron_secret)
+    result = SubscriptionService(db).run_nightly_expired_membership_sync()
+    return ExpiredMembershipCronResponse(
+        message="Expired membership device sync completed",
+        run_date=str(result["run_date"]),
+        subscriptions_marked_expired=int(result["subscriptions_marked_expired"]),
+        members_device_synced=int(result["members_device_synced"]),
+        members_disabled_on_device=int(result["members_disabled_on_device"]),
+        members_still_enabled_on_device=int(result["members_still_enabled_on_device"]),
     )

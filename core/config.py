@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     attendance_punch_retention_months: int = 3
     device_raw_log_retention_days: int = 14
     # Shared secret for POST /api/internal/cron/* (Render Cron Job header X-Cron-Secret).
+    # Daily: sync-expired-memberships. Monthly: purge-attendance.
     cron_secret: str = ""
 
     # Production administrator bootstrap settings

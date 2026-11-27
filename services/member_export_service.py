@@ -250,7 +250,9 @@ def _summary_for_subscriptions(
         return _empty_summary()
 
     active = [
-        item for item in subscriptions if item.status == "active" and item.end_date >= today
+        item
+        for item in subscriptions
+        if item.status == "active" and item.start_date <= today and item.end_date >= today
     ]
 
     if active:

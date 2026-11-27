@@ -12,10 +12,19 @@ from sqlalchemy.pool import StaticPool
 
 from core.device_pins import DEVICE_PRIVILEGE_INACTIVE, DEVICE_PRIVILEGE_NORMAL
 from database import Base
-from models import Member, MembershipPlan, MembershipSubscription, PushDevice
+from models import DeviceCommand, Member, MembershipPlan, MembershipSubscription, PushDevice
 from repositories.subscription_repository import SubscriptionRepository
 from services.push_device_service import PushDeviceService, UserSyncCommand
 from services.subscription_service import SubscriptionService
+
+
+_DEVICE_ACCESS_TABLES = [
+    Member.__table__,
+    MembershipPlan.__table__,
+    MembershipSubscription.__table__,
+    PushDevice.__table__,
+    DeviceCommand.__table__,
+]
 
 
 @pytest.fixture()
@@ -25,7 +34,7 @@ def db() -> Session:
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    Base.metadata.create_all(bind=engine)
+    Base.metadata.create_all(bind=engine, tables=_DEVICE_ACCESS_TABLES)
     SessionLocal = sessionmaker(bind=engine)
     session = SessionLocal()
     try:
@@ -147,12 +156,14 @@ class TestExpiredSubscriptionDeviceSync:
             enabled=False,
         )
 
-    def test_expiry_keeps_access_when_another_active_plan_exists(self, db: Session, monkeypatch):
+    def test_nightly_sync_marks_expired_and_disables_all_without_active_plan(
+        self, db: Session, monkeypatch
+    ):
         member, plan = _seed_member_and_plan(db)
-        expired = MembershipSubscription(
+        sub = MembershipSubscription(
             member_id=member.id,
             plan_id=plan.id,
-            start_date=date.today() - timedelta(days=60),
+            start_date=date.today() - timedelta(days=40),
             end_date=date.today() - timedelta(days=1),
             status="active",
             payment_status="paid",
@@ -161,11 +172,62 @@ class TestExpiredSubscriptionDeviceSync:
             tax_amount=180,
             total_amount=1180,
         )
-        still_active = MembershipSubscription(
+        db.add(sub)
+        db.commit()
+
+        monkeypatch.setattr("services.subscription_service.settings.device_push_enabled", True)
+        mock_push = MagicMock()
+        with patch("services.push_device_service.PushDeviceService", return_value=mock_push):
+            result = SubscriptionService(db).run_nightly_expired_membership_sync()
+
+        db.refresh(sub)
+        assert sub.status == "expired"
+        assert result["subscriptions_marked_expired"] == 1
+        assert result["members_device_synced"] == 1
+        assert result["members_disabled_on_device"] == 1
+        mock_push.set_member_access_on_devices.assert_called_once_with(
+            member.id,
+            member.full_name,
+            enabled=False,
+        )
+
+    def test_nightly_skips_members_already_marked_inactive_on_device(
+        self, db: Session, monkeypatch
+    ):
+        member, plan = _seed_member_and_plan(db)
+        member.device_access_enabled = False
+        sub = MembershipSubscription(
             member_id=member.id,
             plan_id=plan.id,
-            start_date=date.today() - timedelta(days=5),
-            end_date=date.today() + timedelta(days=25),
+            start_date=date.today() - timedelta(days=40),
+            end_date=date.today() - timedelta(days=10),
+            status="expired",
+            payment_status="paid",
+            base_price=1000,
+            tax_percent=18,
+            tax_amount=180,
+            total_amount=1180,
+        )
+        db.add(sub)
+        db.commit()
+
+        monkeypatch.setattr("services.subscription_service.settings.device_push_enabled", True)
+        mock_push = MagicMock()
+        with patch("services.push_device_service.PushDeviceService", return_value=mock_push):
+            result = SubscriptionService(db).run_nightly_expired_membership_sync()
+
+        assert result["subscriptions_marked_expired"] == 0
+        assert result["members_device_synced"] == 0
+        mock_push.set_member_access_on_devices.assert_not_called()
+
+    def test_expiry_keeps_access_when_another_active_plan_exists(self, db: Session, monkeypatch):
+        member, plan = _seed_member_and_plan(db)
+        today = date.today()
+        expired = MembershipSubscription(
+            member_id=member.id,
+            plan_id=plan.id,
+            start_date=today - timedelta(days=60),
+            end_date=today - timedelta(days=1),
             status="active",
             payment_status="paid",
             base_price=1000,
@@ -173,7 +235,25 @@ class TestExpiredSubscriptionDeviceSync:
             tax_amount=180,
             total_amount=1180,
         )
-        db.add_all([expired, still_active])
+        successor = MembershipSubscription(
+            member_id=member.id,
+            plan_id=plan.id,
+            start_date=today,
+            end_date=today + timedelta(days=25),
+            status="scheduled",
+            payment_status="paid",
+            base_price=1000,
+            tax_percent=18,
+            tax_amount=180,
+            total_amount=1180,
+            duration_value=25,
+            duration_unit="days",
+        )
+        db.add_all([expired, successor])
+        db.commit()
+        db.refresh(expired)
+        db.refresh(successor)
+        successor.resume_after_subscription_id = expired.id
         db.commit()
 
         monkeypatch.setattr("services.subscription_service.settings.device_push_enabled", True)
@@ -182,9 +262,9 @@ class TestExpiredSubscriptionDeviceSync:
             SubscriptionService(db).sync_expired_subscriptions()
 
         db.refresh(expired)
-        db.refresh(still_active)
+        db.refresh(successor)
         assert expired.status == "expired"
-        assert still_active.status == "active"
+        assert successor.status == "active"
         mock_push.set_member_access_on_devices.assert_called_once_with(
             member.id,
             member.full_name,

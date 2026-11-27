@@ -50,9 +50,37 @@ class AssignSubscriptionRequest(BaseModel):
     duration_unit: Literal["months", "days"] | None = None
     bonus_duration_value: int | None = Field(default=None, ge=0)
     bonus_duration_unit: Literal["months", "days"] | None = None
+    assignment_intent: Literal["new", "renew", "conversion"] = Field(
+        default="new",
+        description=(
+            "renew=stack after current end (no pause); "
+            "new or conversion=start immediately and auto-pause any effective active membership"
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_duration_fields(self) -> "AssignSubscriptionRequest":
+        if (self.duration_value is None) != (self.duration_unit is None):
+            raise ValueError("Duration value and unit must be provided together")
+        if self.bonus_duration_value is None and self.bonus_duration_unit is None:
+            return self
+        if self.bonus_duration_value is None or self.bonus_duration_unit is None:
+            raise ValueError("Bonus duration value and unit must be provided together")
+        return self
+
+
+class ConvertMembershipRequest(BaseModel):
+    """Start a new plan immediately and pause the current effective membership."""
+
+    plan_id: int = Field(..., ge=1)
+    start_date: date | None = None
+    duration_value: int | None = Field(default=None, gt=0)
+    duration_unit: Literal["months", "days"] | None = None
+    bonus_duration_value: int | None = Field(default=None, ge=0)
+    bonus_duration_unit: Literal["months", "days"] | None = None
+
+    @model_validator(mode="after")
+    def validate_duration_fields(self) -> "ConvertMembershipRequest":
         if (self.duration_value is None) != (self.duration_unit is None):
             raise ValueError("Duration value and unit must be provided together")
         if self.bonus_duration_value is None and self.bonus_duration_unit is None:
@@ -102,6 +130,11 @@ class SubscriptionResponse(BaseModel):
     tax_amount: float
     total_amount: float
     payment_status: str
+    paused_at: str | None = None
+    resumed_at: str | None = None
+    remaining_days: int | None = None
+    resume_after_subscription_id: int | None = None
+    assignment_intent: str | None = None
 
 
 class SubscriptionNotificationResponse(BaseModel):
@@ -127,3 +160,17 @@ class ExpiringSubscriptionsResponse(BaseModel):
     message: str
     data: list[SubscriptionResponse]
     pagination: dict
+
+
+class CancelSubscriptionResponse(BaseModel):
+    message: str
+    data: SubscriptionResponse
+
+
+class ExpiredMembershipCronResponse(BaseModel):
+    message: str
+    run_date: str
+    subscriptions_marked_expired: int
+    members_device_synced: int
+    members_disabled_on_device: int
+    members_still_enabled_on_device: int

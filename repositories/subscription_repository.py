@@ -4,7 +4,7 @@ Subscription repository for plan catalog and assignment queries.
 
 from datetime import date
 
-from sqlalchemy import Select, and_, func, select
+from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from models import Member, MembershipPlan, MembershipSubscription
@@ -132,18 +132,119 @@ class SubscriptionRepository:
         statement = select(MembershipSubscription).where(
             MembershipSubscription.end_date < today,
             MembershipSubscription.status == "active",
+            MembershipSubscription.start_date <= today,
         )
         return self.db.execute(statement).scalars().all()
 
+    def list_expired_subscriptions_for_member(self, member_id: int, today: date) -> list[MembershipSubscription]:
+        statement = (
+            select(MembershipSubscription)
+            .where(
+                MembershipSubscription.member_id == member_id,
+                MembershipSubscription.end_date < today,
+                MembershipSubscription.status == "active",
+                MembershipSubscription.start_date <= today,
+            )
+            .order_by(MembershipSubscription.id.asc())
+        )
+        return list(self.db.execute(statement).scalars().all())
+
+    def list_scheduled_ready(self, member_id: int, today: date) -> list[MembershipSubscription]:
+        statement = (
+            select(MembershipSubscription)
+            .where(
+                MembershipSubscription.member_id == member_id,
+                MembershipSubscription.status == "scheduled",
+                MembershipSubscription.start_date <= today,
+            )
+            .order_by(MembershipSubscription.start_date.asc(), MembershipSubscription.id.asc())
+        )
+        return list(self.db.execute(statement).scalars().all())
+
+    def list_paused_waiting_for_subscription(self, subscription_id: int) -> list[MembershipSubscription]:
+        statement = (
+            select(MembershipSubscription)
+            .where(
+                MembershipSubscription.status == "paused",
+                MembershipSubscription.resume_after_subscription_id == subscription_id,
+            )
+            .order_by(
+                MembershipSubscription.paused_at.asc(),
+                MembershipSubscription.created_at.asc(),
+                MembershipSubscription.id.asc(),
+            )
+        )
+        return list(self.db.execute(statement).scalars().all())
+
+    def list_scheduled_waiting_for_subscription(self, subscription_id: int) -> list[MembershipSubscription]:
+        statement = (
+            select(MembershipSubscription)
+            .where(
+                MembershipSubscription.status == "scheduled",
+                MembershipSubscription.resume_after_subscription_id == subscription_id,
+            )
+            .order_by(
+                MembershipSubscription.start_date.asc(),
+                MembershipSubscription.created_at.asc(),
+                MembershipSubscription.id.asc(),
+            )
+        )
+        return list(self.db.execute(statement).scalars().all())
+
+    def list_orphan_scheduled_ready(self, member_id: int, today: date) -> list[MembershipSubscription]:
+        """Scheduled rows without a queue predecessor, eligible by original start date (legacy)."""
+        statement = (
+            select(MembershipSubscription)
+            .where(
+                MembershipSubscription.member_id == member_id,
+                MembershipSubscription.status == "scheduled",
+                MembershipSubscription.resume_after_subscription_id.is_(None),
+                MembershipSubscription.start_date <= today,
+            )
+            .order_by(
+                MembershipSubscription.start_date.asc(),
+                MembershipSubscription.created_at.asc(),
+                MembershipSubscription.id.asc(),
+            )
+        )
+        return list(self.db.execute(statement).scalars().all())
+
     def member_has_active_membership(self, member_id: int, today: date) -> bool:
-        """True when the member has at least one non-expired active subscription."""
+        """True when the member has a currently effective active subscription."""
         statement = (
             select(MembershipSubscription.id)
             .where(
                 MembershipSubscription.member_id == member_id,
                 MembershipSubscription.status == "active",
+                MembershipSubscription.start_date <= today,
                 MembershipSubscription.end_date >= today,
             )
             .limit(1)
         )
         return self.db.execute(statement).scalar_one_or_none() is not None
+
+    def list_member_ids_needing_device_disable(self, today: date) -> set[int]:
+        """
+        Members without a valid plan whose device access is not yet marked inactive.
+
+        Used by nightly cron to avoid re-queueing Pri=1 for everyone every night.
+        """
+        has_active = (
+            select(MembershipSubscription.id)
+            .where(
+                MembershipSubscription.member_id == Member.id,
+                MembershipSubscription.status == "active",
+                MembershipSubscription.start_date <= today,
+                MembershipSubscription.end_date >= today,
+            )
+            .limit(1)
+            .correlate(Member)
+            .exists()
+        )
+        statement = select(Member.id).where(
+            Member.deleted_at.is_(None),
+            Member.status == "active",
+            ~has_active,
+            or_(Member.device_access_enabled.is_(None), Member.device_access_enabled.is_(True)),
+        )
+        return set(self.db.execute(statement).scalars().all())
